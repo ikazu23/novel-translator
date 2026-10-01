@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         韓国小説 丸ごと翻訳
 // @namespace    ikasumi-novel-tl
-// @version      9.4
+// @version      9.5
 // @description  Ridi / カカオページ / その他の韓国語サイトの本文を1話単位で文脈ごとLLM翻訳
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -257,6 +257,15 @@ const KZ_SET = GM_setValue;
         }
         try { res(JSON.parse(txt)); } catch { rej(new Error('応答を読めません (' + status + ')')); }
       };
+      // Chrome・Edgeでは拡張経由だと最後にまとめて届くことがあるので、まずブラウザの通信で直接受け取る
+      if (sse && sse.onText && !noDirect && /Chrome|Edg\//.test(navigator.userAgent) && !/Firefox/.test(navigator.userAgent)) {
+        directStream(url, headers, body, progress).then(r => {
+          if (r) finish(r.status, r.txt, r.headers); else viaGM();
+        }, e => rej(e));
+        return;
+      }
+      viaGM();
+      function viaGM() {
       // Tampermonkeyは「stream」で受け取ると途中経過が届く。ほかの拡張は onprogress で届く場合だけ途中表示
       const useStream = !!(sse && sse.onText) && typeof GM_info !== 'undefined' && /tampermonkey/i.test(GM_info.scriptHandler || '');
       GM_xmlhttpRequest({
@@ -286,7 +295,34 @@ const KZ_SET = GM_setValue;
         onerror: r => rej(new Error('通信エラー（' + [r && r.status, r && (r.error || r.statusText)].filter(Boolean).join(' ') + '）')),
         ontimeout: () => rej(new Error('タイムアウト')),
       });
+      }
     });
+  }
+
+  // ブラウザの通信（fetch）で直接ストリーミング受信。サイトの制限で使えなければ null を返して拡張経由に切り替える
+  let noDirect = false;
+  async function directStream(url, headers, body, progress) {
+    let r;
+    try {
+      r = await fetch(url, {
+        method: 'POST', mode: 'cors', credentials: 'omit',
+        headers: Object.assign({ 'content-type': 'application/json' }, headers),
+        body: JSON.stringify(body),
+      });
+    } catch { noDirect = true; return null; } // ページ側の制限（CSPなど）で送れない
+    const hs = [...r.headers].map(([k, v]) => k + ': ' + v).join('\n');
+    if (!r.body || !r.body.getReader) return { status: r.status, txt: await r.text(), headers: hs };
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let txt = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        txt += dec.decode(value, { stream: true });
+        progress(txt);
+      }
+    } catch (e) { throw new Error('通信エラー（' + (e && e.message) + '）'); }
+    return { status: r.status, txt, headers: hs };
   }
 
   // メインのモデル → 混雑時は予備モデルへ
