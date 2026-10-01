@@ -16,11 +16,17 @@ Ridi・カカオページなどの韓国語の小説を、**ページを開い�
 ## 1. 入れ方
 
 ### スマホ（Android）
-1. **Firefox** を入れる
-2. Firefoxの拡張機能から **Tampermonkey** を入れる
-3. 下のリンクを開いて「インストール」を押す
+1. **Firefox** か **Edge** に、拡張機能の **Tampermonkey** を入れる
+2. 下のリンクを開いて「インストール」を押す
 
 👉 **[スクリプトをインストール](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.user.js)**
+
+### iPhone / iPad（Safari）
+1. App Storeで **Tampermonkey**（有料・買い切り）を入れる
+2. 「設定」→「アプリ」→「Safari」→「機能拡張」→「Tampermonkey」をオンにして、**「すべてのWebサイト」を「許可」**にする
+3. **Safari** で上のリンクを開いて「インストール」を押す
+
+> 許可が「一部のサイトだけ」のままだと、Tampermonkeyの画面に「Limited runtime host permissions…」という警告が出て、翻訳や自動更新がうまく動きません。
 
 ### PC（Chrome / Edge）
 1. **Tampermonkey** を入れる
@@ -28,7 +34,7 @@ Ridi・カカオページなどの韓国語の小説を、**ページを開い�
 3. Tampermonkeyの「詳細」で **「ユーザースクリプトを許可」をオン**にする
 4. 上のリンクからインストール
 
-> スマホの **Chrome** と iPhoneの **Safari** は拡張機能が使えないので動きません。スマホは **Firefox** を使ってください。
+> 拡張機能が使えないブラウザでは使えません。
 
 ### インストール画面が出ずにコードが表示されたとき
 1. ブラウザのメニュー → **Tampermonkey** → **ダッシュボード** を開く
