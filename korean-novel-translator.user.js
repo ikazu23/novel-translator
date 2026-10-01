@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         韓国小説 丸ごと翻訳
 // @namespace    ikasumi-novel-tl
-// @version      9.5
+// @version      9.6
 // @description  Ridi / カカオページ / その他の韓国語サイトの本文を1話単位で文脈ごとLLM翻訳
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -257,8 +257,8 @@ const KZ_SET = GM_setValue;
         }
         try { res(JSON.parse(txt)); } catch { rej(new Error('応答を読めません (' + status + ')')); }
       };
-      // Chrome・Edgeでは拡張経由だと最後にまとめて届くことがあるので、まずブラウザの通信で直接受け取る
-      if (sse && sse.onText && !noDirect && /Chrome|Edg\//.test(navigator.userAgent) && !/Firefox/.test(navigator.userAgent)) {
+      // Firefox以外（Chrome・Edge・Safari）では拡張経由だと最後にまとめて届くことがあるので、まずブラウザの通信で直接受け取る
+      if (sse && sse.onText && !noDirect && !/Firefox\//.test(navigator.userAgent)) {
         directStream(url, headers, body, progress).then(r => {
           if (r) finish(r.status, r.txt, r.headers); else viaGM();
         }, e => rej(e));
