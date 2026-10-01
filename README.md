@@ -28,7 +28,17 @@ Ridi・カカオページなどの韓国語の小説を、**ページを開い�
 3. Tampermonkeyの「詳細」で **「ユーザースクリプトを許可」をオン**にする
 4. 上のリンクからインストール
 
-> iPhoneのSafariでは動きません。
+> スマホの **Chrome** と iPhoneの **Safari** は拡張機能が使えないので動きません。スマホは **Firefox** を使ってください。
+
+### インストール画面が出ずにコードが表示されたとき
+1. ブラウザのメニュー → **Tampermonkey** → **ダッシュボード** を開く
+2. **ユーティリティ** タブ → **「URLからインストール」** に下のアドレスを貼って「インストール」
+
+```
+https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.user.js
+```
+
+この方法で入れても、自動更新はちゃんと届きます。
 
 ---
 
