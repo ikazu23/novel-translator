@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         韓国小説 丸ごと翻訳
 // @namespace    ikasumi-novel-tl
-// @version      9.6
-// @description  Ridi / カカオページ / その他の韓国語サイトの本文を1話単位で文脈ごとLLM翻訳
+// @version      10.2
+// @description  Ridi / カカオページ / 晋江 / AO3 など、どのサイトでも韓国語・中国語・英語の本文を1話単位で文脈ごとLLM翻訳
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
 // @match        *://*.page.kakao.com/*
@@ -40,9 +40,98 @@ const KZ_SET = GM_setValue;
     if (/^(cache2?:|live:|para:|sheet:|tail:|ep:)/.test(k)) { backupDirty = true; scheduleBackup(); }
   };
 
-  const KO = /[\uAC00-\uD7A3]/g;
-  const ko = s => ((s || '').match(KO) || []).length;
+  // ---------- 原文の言語（韓国語・中国語・英語）----------
+  // ko(s)：原文の言語の文字数。中国語は漢字が日本語と重なるので「漢字 − かな×3」、英語は「英字 − (かな+漢字)×5」で数える
+  //   （日本語の文はかながあるので0になる＝訳し終わった文・日本語のメニューは原文として数えない）
+  const KO = /[\uAC00-\uD7A3]/g, HAN = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/g, KANA = /[\u3041-\u30FF]/g, LAT = /[A-Za-z]/g;
+  const cnt = (s, re) => ((s || '').match(re) || []).length;
+  const countAs = (lang, s) => {
+    s = String(s || '');
+    if (lang === 'zh') return Math.max(0, cnt(s, HAN) - cnt(s, KANA) * 3);
+    if (lang === 'en') { s = s.replace(/<\/?t\d+\/?>/g, ''); return Math.max(0, cnt(s, LAT) - (cnt(s, KANA) + cnt(s, HAN)) * 5); }
+    return cnt(s, KO);
+  };
+  const LANGS = {
+    ko: { name: '韓国語', novel: '韓国語ウェブ小説', min: 2,
+      names: '人名はカタカナ表記。店名・施設名・組織名・スキル名・アイテム名など意味のある固有名詞は、音をそのままカタカナにせず、意味が伝わる日本語にする（例：책방=本屋、固有の部分だけカタカナ）。' },
+    zh: { name: '中国語', novel: '中国語ウェブ小説', min: 4,
+      names: '人名・地名は原文の漢字を日本の字体（新字体）に直して使う。簡体字・繁体字のまま残さない。門派・組織・功法・スキル・アイテムなどの固有名詞は漢字を活かしつつ、日本の読者に意味が伝わる表記にする。' },
+    en: { name: '英語', novel: '英語のウェブ小説', min: 8,
+      names: '人名はカタカナ表記。店名・施設名・組織名・スキル名・アイテム名など意味のある固有名詞は、音をそのままカタカナにせず、意味が伝わる日本語にする（例：The Rusty Anchor=錆びた錨亭）。' },
+  };
+  const LANG_OPT = { auto: '自動', ko: '韓国語', zh: '中国語', en: '英語' };
+  // 自動のときは本文の文字から判定（ページが変わるか数秒たつと判定し直す）
+  // small=true：本文の場所が分かっている（イカ墨ノベルなど）ので、短い文でも判定する
+  // 文字のまとまり（テキストノード）ごとに数えて足す：日本語のメニューやボタンが混ざっていても引きずられない
+  const textsOf = root => {
+    const out = [];
+    try {
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let n, i = 0; (n = w.nextNode()) && i < 20000; i++) {
+        const p = n.parentElement;
+        if (p && (p.closest('#kztl-host') || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName))) continue;
+        if (n.nodeValue.trim()) out.push(n.nodeValue);
+      }
+    } catch { /* 読めない */ }
+    return out;
+  };
+  const koNodes = root => (root ? textsOf(root).reduce((a, t) => a + ko(t), 0) : 0);
+  function detectLang(texts, small) {
+    const sc = { ko: 0, zh: 0, en: 0 };
+    for (const t of texts) {
+      sc.ko += cnt(t, KO);
+      sc.zh += Math.max(0, countAs('zh', t));
+      sc.en += Math.max(0, countAs('en', t)) / 4; // 英語は4文字≒1字として比べる
+    }
+    const min = small ? { ko: 2, zh: 4, en: 3 } : { ko: 20, zh: 50, en: 75 };
+    const best = Object.keys(sc).filter(x => sc[x] >= min[x]).sort((x, y) => sc[y] - sc[x])[0];
+    return { lang: best || 'ko', sure: !!best };
+  }
+  // 一度はっきり判定できた話は、その話の間は言語を変えない（訳して日本語になった後に判定がずれないように）
+  const langSticky = new Map();
+  const resetLang = () => { langCache.at = 0; langSticky.clear(); };
+  let langCache = { at: 0, id: '', lang: 'ko' };
+  function curLang() {
+    const now = Date.now();
+    let id = '';
+    try { id = pageId(); } catch { /* 準備前 */ }
+    if (now - langCache.at < 2500 && langCache.id === id) return langCache.lang;
+    let set = 'auto';
+    try { set = (GM_getValue('cfg', {}) || {}).lang || 'auto'; } catch { /* 準備前 */ }
+    let lang = set;
+    if (set === 'auto') {
+      if (langSticky.has(id)) lang = langSticky.get(id);
+      else if (/ridibooks|kakao\.com/.test(location.host)) lang = 'ko'; // 韓国のサイトはいつも韓国語
+      else if (/(^|\.)jjwxc\.(net|com)$/.test(location.host)) lang = 'zh'; // 晋江はいつも中国語
+      else {
+        let mb = null, texts = [];
+        try {
+          mb = document.querySelector('[data-kztl-body]');
+          // シャドウDOM・iframeの中の本文も見る
+          texts = mb ? textsOf(mb) : deepRoots().filter(r => r !== document.body).concat(document.body ? [document.body] : []).flatMap(textsOf);
+        } catch { /* 準備前 */ }
+        const r = detectLang(texts, !!mb);
+        lang = r.lang;
+        if (r.sure) langSticky.set(id, lang);
+      }
+    }
+    langCache = { at: now, id, lang: LANGS[lang] ? lang : 'ko' };
+    return langCache.lang;
+  }
+  const L = () => LANGS[curLang()];
+  const ko = s => countAs(curLang(), s);
+  // 訳文に原文の言語が残っているか（残りの文字数。少しなら0）
+  const leftIn = t => { const n = ko(t); return n >= L().min ? n : 0; };
   const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36) + s.length; };
+
+  // イカ墨ノベルなど、ページ側が作品・話の目印を出しているときはそれを使う
+  //   <html data-kztl-work="作品ID" data-kztl-title="作品名" data-kztl-ep="話ID" data-kztl-ep-title="話のタイトル">
+  //   本文の入れ物には data-kztl-body
+  const mark = () => document.documentElement.dataset;
+  const pageTitle = () => {
+    const d = mark();
+    return d.kztlWork ? [d.kztlTitle, d.kztlEpTitle].filter(Boolean).join(' ') || document.title : document.title;
+  };
 
   const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-chat' };
   // 一覧に出す候補
@@ -68,7 +157,7 @@ const KZ_SET = GM_setValue;
     return c;
   };
 
-  const SYSTEM = `あなたは韓国語ウェブ小説を日本語に訳す文芸翻訳者です。
+  const sys = () => { const l = L(); return `あなたは${l.novel}を日本語に訳す文芸翻訳者です。
 ルール:
 - 要約・省略・加筆をしない。原文の内容をすべて訳す。
 - 段落構成を保つ。入力と同じ段落数で出力し、段落の間は空行1つ。
@@ -76,12 +165,12 @@ const KZ_SET = GM_setValue;
 - 会話文は人物の性格・関係性に合った口語にする。
 - 与えられた文脈（話全体の原文、直前の訳文）を踏まえ、呼称・一人称・口調・代名詞を一貫させる。
 - 用語集・作品メモがある場合、その訳語に必ず従う。
-- 人名はカタカナ表記。店名・施設名・組織名・スキル名・アイテム名など意味のある固有名詞は、音をそのままカタカナにせず、意味が伝わる日本語にする（例：책방=本屋、固有の部分だけカタカナ）。
+- ${l.names}
 - 出力は訳文のみ。前置き、注釈、見出しは一切付けない。
-- 文字化け・機械音声・呪文のような崩れた文や繰り返し、文字の間の空白などの演出も、韓国語のまま残さず、同じ雰囲気の日本語で再現する。
-- 原文を出力に含めない。「原文 -> 訳文」や「原文（訳文）」のような対訳形式にしない。作中のルール文・システムメッセージ・標語・引用文なども含め、韓国語は一文字も残さない。表や記号（| など）の形はそのまま保ち、中の韓国語だけを日本語にする。`;
+- 文字化け・機械音声・呪文のような崩れた文や繰り返し、文字の間の空白などの演出も、${l.name}のまま残さず、同じ雰囲気の日本語で再現する。
+- 原文を出力に含めない。「原文 -> 訳文」や「原文（訳文）」のような対訳形式にしない。作中のルール文・システムメッセージ・標語・引用文なども含め、${l.name}の文は一文字も残さない。表や記号（| など）の形はそのまま保ち、中の${l.name}だけを日本語にする。`; };
 
-  const SYSTEM_NUM = SYSTEM + `
+  const sysNum = () => sys() + `
 - 入力の各段落の先頭には [[番号]] が付いている。出力でも各段落の先頭に同じ [[番号]] を同じ順で付ける。1つの番号に1段落。番号の追加・削除・統合・分割をしない。
 - 段落内の <t1>…</t1> や <t2/> のようなタグは、太字・斜体・取り消し線・文字色などの装飾の目印。訳文でも、対応する語句を同じ番号のタグで囲む。タグの番号・数・入れ子を変えず、消さず、新しく作らない。<t2/> のような単独タグは対応する位置に置く。`;
 
@@ -126,13 +215,15 @@ const KZ_SET = GM_setValue;
   // 本文のまとまり（グループ）をすべて返す。カカオのように本文が小さなグループに分かれていても全部まとめて訳す
   // 本文ではない場所（コメント・前後の話へのリンク・おすすめ作品・メニューなど）
   const NON_BODY = /comment|reply|review|recommend|related|banner|footer|header|(^|[\s_-])nav|gnb|lnb|toolbar|sidebar|share|ranking|popular|advert|(^|[\s_-])ad([\s_-]|$)|episode[-_]?list|series[-_]?list|other[-_]?(book|work)|댓글|추천|리뷰/i;
+  // 名前に comment などが入っていても本文の入れ物（晋江の段落コメント付き本文など）
+  const BODY_OK = /paragraph_?comment_?content|noveltext|novelbody|userstuff|chapter[-_]?(content|text|body)|read[-_]?content/i;
   function inNonBody(el, stopAt) {
     for (let e = el; e && e.nodeType === 1 && e !== stopAt; e = e.parentElement) {
       if (/^(A|BUTTON|NAV|HEADER|FOOTER|ASIDE|FORM|TEXTAREA|INPUT|SELECT)$/.test(e.tagName)) return true;
       const role = e.getAttribute('role');
       if (role && /navigation|button|banner|complementary|contentinfo|dialog|form|search/.test(role)) return true;
       const idc = (e.id || '') + ' ' + (typeof e.className === 'string' ? e.className : '');
-      if (idc.trim() && NON_BODY.test(idc)) return true;
+      if (idc.trim() && NON_BODY.test(idc) && !BODY_OK.test(idc)) return true;
     }
     return false;
   }
@@ -154,7 +245,15 @@ const KZ_SET = GM_setValue;
     return best;
   }
 
+  const markedBody = () => {
+    const el = document.querySelector('[data-kztl-body]');
+    return el && koNodes(el) > 0 ? el : null;
+  };
   function findBodies() {
+    const mb = markedBody();
+    if (mb) return mark().kztlEp ? [mb] : []; // 目印のあるアプリで話をひらいていないとき（本棚・目次）は訳さない
+    const sb = siteBody();
+    if (sb && ko(sb.textContent) > 0) return [sb];
     const saved = GM_getValue('sel:' + location.host);
     if (saved) {
       const el = document.querySelector(saved);
@@ -176,6 +275,10 @@ const KZ_SET = GM_setValue;
   }
 
   function findBody() {
+    const mb = markedBody();
+    if (mb) return mark().kztlEp ? mb : null;
+    const sb = siteBody();
+    if (sb && ko(sb.textContent) > 0) return sb;
     const saved = GM_getValue('sel:' + location.host);
     if (saved) {
       const el = document.querySelector(saved);
@@ -217,7 +320,7 @@ const KZ_SET = GM_setValue;
       document.removeEventListener('mouseover', over, true);
       document.removeEventListener('click', click, true);
       GM_setValue('sel:' + location.host, cssPath(cur));
-      alert('本文エリアを保存しました（' + ko(cur.innerText) + '文字の韓国語を検出）');
+      alert('本文エリアを保存しました（' + ko(cur.innerText) + '文字の' + L().name + 'を検出）');
     };
     document.addEventListener('mouseover', over, true);
     document.addEventListener('click', click, true);
@@ -506,10 +609,11 @@ const KZ_SET = GM_setValue;
   // タイトルの数字（話数）を伏せたものを作品のキーにする
   // ---------- 作品ごとの記録（人物・用語メモと「前の話の最後」）----------
   // 作品の見分け方：カカオはアドレスの作品番号、それ以外はタイトルから話数やサイト名を除いたもの
-  const workName = () => document.title
+  const workName = () => (mark().kztlWork ? mark().kztlTitle || mark().kztlWork : document.title)
     .replace(/\s*[|｜\-–:]\s*(카카오페이지|카카오 페이지|리디북스|리디|RIDI|RIDIBOOKS|네이버 ?시리즈|NAVER|문피아|MUNPIA|노벨피아|NOVELPIA|조아라|JOARA|포스타입|POSTYPE|블라이스|BLICE|원스토리|ONESTORE|밀리의 ?서재|북큐브|미스터블루|봄툰|레진|교보문고|예스24|알라딘)[^|｜]*$/i, '')
     .replace(/\d+\s*(화|話|권|편|회|부)?/g, '#').replace(/\s+/g, ' ').trim();
   function workKey() {
+    if (mark().kztlWork) return 'ikasumi:' + mark().kztlWork;
     const m = location.pathname.match(/\/content\/(\d+)/);
     if (/kakao/.test(location.host) && m) return 'kakao:' + m[1];
     return location.host + ':' + workName();
@@ -529,7 +633,7 @@ const KZ_SET = GM_setValue;
   const tailKey = () => 'tail:' + workKey();
   function saveTail(text) {
     const t = String(text || '').replace(/<\/?t\d+\/?>/g, '').trim();
-    if (t) GM_setValue(tailKey(), { ep: location.host + location.pathname, text: t.slice(-1500), at: Date.now() });
+    if (t) GM_setValue(tailKey(), { ep: pageId(), text: t.slice(-1500), at: Date.now() });
   }
   // 段落ごとの訳の記録（作品ごと）。ページの作りが端末で違っても、同じ段落なら記録から出せる
   // ---------- エンジンごとに訳を分けて保存（Claude版とGemini版を両方残す）----------
@@ -557,7 +661,7 @@ const KZ_SET = GM_setValue;
 
   function prevTail() {
     const v = GM_getValue(tailKey(), null);
-    return v && v.ep !== location.host + location.pathname ? v.text : '';
+    return v && v.ep !== pageId() ? v.text : '';
   }
 
   // 訳し終わったあとに裏で更新する（読むのは待たせない）
@@ -571,7 +675,7 @@ const KZ_SET = GM_setValue;
     try {
       const sm = c.sheetModel.trim() || SHEET_MODELS[c.provider];
       const models = sm ? [sm, ...modelList(c)] : modelList(c); // 安いモデルが使えなければ翻訳用のモデルで
-      const res = await withRetry(m => llm(c, 'あなたは韓国語小説を日本語に訳すための人物・用語メモを管理する編集者です。', user, m), models, () => {});
+      const res = await withRetry(m => llm(c, `あなたは${L().novel}を日本語に訳すための人物・用語メモを管理する編集者です。`, user, m), models, () => {});
       const sheet = res.replace(/^```\w*\n?|```$/g, '').trim().slice(0, 6000);
       if (sheet) GM_setValue(k, sheet);
     } catch { /* メモの更新に失敗しても翻訳には影響しない */ }
@@ -579,7 +683,7 @@ const KZ_SET = GM_setValue;
 
   // ctx：その話の中で毎回同じ部分（キャッシュされる）／msg：塊ごとに変わる部分
   function buildUser(c, whole, ref, refLabel, body) {
-    let user = `【ページタイトル】${document.title}\n\n`;
+    let user = `【ページタイトル】${pageTitle()}\n\n`;
     if (c.instructions.trim()) user += `【追加の指示（必ず従う。作品名の指定がある行は、ページタイトルが一致する作品にだけ適用）】\n${c.instructions.trim()}\n\n`;
     if (c.glossary.trim()) user += `【用語集（原語=訳語）】\n${c.glossary.trim()}\n\n`;
     const sheet = getSheet();
@@ -593,13 +697,82 @@ const KZ_SET = GM_setValue;
     return { ctx: user, msg };
   }
 
+  // ---------- 晋江文学城など：本文の場所・<br>区切り ----------
+  // サイトごとの本文の入れ物（見つからなければ自動で探す）
+  const SITE_BODY = [
+    [/(^|\.)jjwxc\.(net|com)$/, 'div.noveltext, #novelbody, .noveltext, #content'],
+    [/(^|\.)(archiveofourown\.org|ao3\.org)$/, '#workskin, #chapters'], // AO3：題名・あらすじ・前書き・本文・後書き
+  ];
+  const siteBody = () => {
+    for (const [re, sel] of SITE_BODY) if (re.test(location.host)) { const el = document.querySelector(sel); if (el) return el; }
+    return null;
+  };
+  const isJJ = () => /(^|\.)jjwxc\.(net|com)$/.test(location.host);
+
+  // 「文<br>文<br><br>文」のように<br>だけで区切られた本文を、1行ずつの段落に分ける（見た目は同じ）
+  const BLOCK_TAG = /^(P|DIV|H[1-6]|UL|OL|LI|BLOCKQUOTE|TABLE|SECTION|ARTICLE|HR|PRE|FIGURE|DL|DD|DT|FORM|CENTER)$/;
+  function splitBr(root) {
+    // 改行文字で行を分けている作り（white-space: pre など）は、先に<br>に直す
+    for (const el of [root, ...root.querySelectorAll('*')]) {
+      if (el.closest('#kztl-host') || !/^pre|break-spaces/.test(getComputedStyle(el).whiteSpace)) continue;
+      for (const n of [...el.childNodes]) {
+        if (n.nodeType !== 3 || !n.nodeValue.includes('\n') || !ko(n.nodeValue)) continue;
+        const frag = el.ownerDocument.createDocumentFragment();
+        n.nodeValue.split('\n').forEach((line, i) => { if (i) frag.appendChild(el.ownerDocument.createElement('br')); if (line) frag.appendChild(el.ownerDocument.createTextNode(line)); });
+        el.replaceChild(frag, n);
+      }
+    }
+    const isInline = n => n.nodeType === 3 || (n.nodeType === 1 && !BLOCK_TAG.test(n.tagName) && n.tagName !== 'BR');
+    const targets = [root, ...root.querySelectorAll('*')].filter(el => el.nodeType === 1 && !el.closest('#kztl-host') &&
+      [...el.childNodes].filter(n => n.nodeName === 'BR').length >= 2 &&
+      [...el.childNodes].some(n => isInline(n) && ko(n.textContent) > 0)); // 文字が<span>や<font>に入っていてもOK
+    let made = 0;
+    for (const el of targets) {
+      let run = [];
+      const flush = br => {
+        const has = run.some(n => (n.textContent || '').trim());
+        if (has) {
+          const d = el.ownerDocument.createElement('div');
+          d.className = 'kztl-line';
+          el.insertBefore(d, run[0]);
+          run.forEach(n => d.appendChild(n));
+          if (br) br.remove(); // 行の終わりの<br>は段落が代わりをする（空行の<br>は残す）
+          made++;
+        }
+        run = [];
+      };
+      for (const n of [...el.childNodes]) {
+        if (n.nodeName === 'BR') flush(n);
+        else if (!isInline(n)) flush(null);
+        else run.push(n);
+      }
+      flush(null);
+    }
+    return made;
+  }
+
+  // 訳す前の下ごしらえ（晋江だけ：<br>区切りの段落分け・見えない字と透かしの文を消す）
+  async function prepBodies(c, roots) {
+    // <br>だけで区切られた本文は1行ずつの段落に。韓国語は今までどおり（保存済みの訳と段落がずれて訳し直しにならないように）
+    if (curLang() !== 'ko' || isJJ()) roots.forEach(splitBr);
+    if (!isJJ()) return { err: null };
+    for (const root of roots) {
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let n; (n = w.nextNode());) {
+        const v = n.nodeValue.replace(/‌/g, '').replace(/@?无限好文，?尽在晋江文学城/g, '');
+        if (v !== n.nodeValue) n.nodeValue = v;
+      }
+    }
+    return { err: null };
+  }
+
   // ---------- 翻訳 ----------
   let busy = false;
-  const setBusy = v => { busy = v; try { ui.setBusy(v); } catch { /* 画面の準備前 */ } if (!v) try { snapLater(); } catch { /* 準備前 */ } };
+  const setBusy = v => { busy = v; try { ui.setBusy(v); } catch { /* 画面の準備前 */ } if (!v) try { snapLater(); if (keep) setTimeout(reapplyKeep, 50); } catch { /* 準備前 */ } };
   let lastText = '', lastHref = '';
   let copyCtx = null; // 上書きモードのとき：ページの並びどおりにコピーを組み立てるための情報
   // 話の見分けはアドレスの「?」「#」より前だけで行う（読み進めると末尾が変わるサイトがあるため）
-  const pageId = () => location.host + location.pathname;
+  const pageId = () => location.host + location.pathname + (mark().kztlEp ? '#' + mark().kztlEp : '');
   function setLast(t) { lastText = t || ''; lastHref = pageId(); ui.canCopy(!!lastText); }
   function copyText() {
     if (!lastText) {
@@ -671,7 +844,7 @@ const KZ_SET = GM_setValue;
     });
     const src = firstEl;
     const bodyHtml = parts.join('\n<div style="height:2em"></div>\n');
-    const title = document.title.replace(/\s+/g, ' ').trim() || 'translation';
+    const title = pageTitle().replace(/\s+/g, ' ').trim() || 'translation';
     const esc = t => t.replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
     const w = Math.round(src.getBoundingClientRect().width) || 720;
     let data = null;
@@ -839,13 +1012,14 @@ ${bodyHtml}
       if (Math.abs(ratio - 1) > 0.05) para.sizeRatio = Math.round(ratio * 100) / 100;
       paras.push(para);
     });
-    return { v: 1, title: document.title.replace(/\s+/g, ' ').trim(), source: location.href, baseSize, paras };
+    return { v: 1, title: pageTitle().replace(/\s+/g, ' ').trim(), source: location.href, baseSize, paras };
   }
   async function translate(force) {
     if (busy) return;
     const el = findBody();
     ui.open();
     if (!el) return ui.status('本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」を使ってください');
+    await prepBodies(cfg(), [el]);
     const paras = el.innerText.split(/\n+/).map(s => s.trim()).filter(Boolean);
     const src = paras.join('\n\n');
     const key = tagged('cache:' + hash(location.pathname + location.search + src));
@@ -874,7 +1048,7 @@ ${bodyHtml}
           if (out.slice(0, k).some(t => t == null)) return; // 前の塊が終わっていなければ表示しない
           ui.render([...out.slice(0, k), part].join('\n\n'));
         };
-        out[k] = cleanBlock(await withRetry(m => llm(c, SYSTEM, user, m, onText), modelList(c),
+        out[k] = cleanBlock(await withRetry(m => llm(c, sys(), user, m, onText), modelList(c),
           (...a) => ui.status(waitMsg(...a)))).trim();
       } catch (e) {
         if (!/^BLOCKED/.test(e.message)) throw e;
@@ -923,7 +1097,7 @@ ${bodyHtml}
     t = stripGloss(t.trim());
     if (src && t.startsWith(src) && t.length > src.length) t = t.slice(src.length).replace(/^\s*(?:->|→|⇒|=>)?\s*/, '');
     const parts = t.split(/\s*(?:->|→|⇒)\s*/);
-    if (parts.length > 1 && ko(parts[0]) > 0) {
+    if (parts.length > 1 && (curLang() === 'ko' ? ko(parts[0]) > 0 : leftIn(parts[0]) > 0)) {
       const rest = parts.slice(1).join(' → ');
       if (ko(rest) < ko(parts[0]) / 2) t = rest.trim();
     }
@@ -1111,10 +1285,12 @@ ${bodyHtml}
       if (tr[i] == null || !el.isConnected) return;
       if (!applied.has(el)) applied.set(el, el.innerHTML);
       rebuild(el, tr[i]);
+      el.setAttribute('data-kztl-tr', ''); // 訳文を表示中の印（ページ側が編集前に確認できるように）
       markJa(el);
     });
     inPlaceOn = true;
     ui.fabLabel('原');
+    startKeep();
   }
 
   function restore() {
@@ -1122,14 +1298,58 @@ ${bodyHtml}
     clearOverlays();
     restoreText();
     unmarkJa();
-    for (const [el, html] of applied) if (el.isConnected) el.innerHTML = html;
+    for (const [el, html] of applied) if (el.isConnected) { el.innerHTML = html; el.removeAttribute('data-kztl-tr'); }
     applied.clear();
     inPlaceOn = false;
     ui.fabLabel('訳');
+    stopKeep();
+  }
+
+  // ---------- 訳の表示を保つ（数秒ごとに本文を描き直すサイト向け：晋江など）----------
+  // 訳を表示中にサイトが本文を元に戻したら、段落ごとの訳の記録からすぐ入れ直す（料金なし）。「原」を押すと止まる
+  let keep = null, keepBusy = false;
+  function startKeep() {
+    if (keep && keep.id === pageId()) return;
+    stopKeep();
+    const id = pageId();
+    const obs = new MutationObserver(recs => {
+      if (busy || keepBusy || !keep || pageId() !== id) return;
+      // 本文の中で何か変わったときだけ（広告や時計など本文の外の変化は無視）
+      const roots = keep.roots || [];
+      const inBody = !roots.length || roots.some(r => !r.isConnected) ||
+        recs.some(m => roots.some(r => r.contains(m.target)));
+      if (inBody) reapplyKeep();
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    keep = { id, obs, roots: null, visionAt: 0 };
+  }
+  function stopKeep() { if (keep) keep.obs.disconnect(); keep = null; }
+  async function reapplyKeep() {
+    if (!keep || keepBusy || busy) return;
+    keepBusy = true;
+    try {
+      for (const el of [...applied.keys()]) if (!el.isConnected) applied.delete(el); // 描き直しで消えた要素の記録は捨てる
+      const roots = findBodies();
+      if (!roots.length) return;
+      keep.roots = roots;
+      if (roots.reduce((a, r) => a + koNodes(r), 0) < 4) return; // 原文がほぼ無い＝訳を表示中のまま
+      await prepBodies(cfg(), roots, true);
+      const els = roots.flatMap(r => collectParas(r).filter(el => !inNonBody(el, r) && !isUiWord(el.textContent)));
+      const srcs = els.map(serialize);
+      const pm = getParaMap();
+      const tr = srcs.map(x => (pm[x] != null ? pm[x] : null));
+      if (!tr.some(t => t != null)) return;
+      applyTr(els, tr);
+      copyCtx = { roots, els, tr, srcs, href: pageId() };
+      setLast(tr.map((t, i) => toPlain(els[i], t ?? srcs[i])).join('\n\n'));
+    } catch { /* 入れ直せなくても次の変化でまた試す */ } finally {
+      // 自分で書き換えた分の通知は無視する
+      setTimeout(() => { keepBusy = false; }, 0);
+    }
   }
 
   // 韓国語が残っている（または訳が抜けた）段落か
-  const needsFix = t => t == null || ko(t) >= 2;
+  const needsFix = t => t == null || leftIn(t) > 0;
 
   // 韓国語が残った段落だけ、小さく分けて最大2回まで訳し直す
   async function fixLeftovers(c, els, srcs, tr, whole, ref, skip) {
@@ -1137,18 +1357,18 @@ ${bodyHtml}
     for (let round = 1; round <= 2; round++) {
       const redo = srcs.map((_, i) => i).filter(i => !skip.has(i) && needsFix(tr[i]));
       if (!redo.length) break;
-      ui.toast(`韓国語が残った${redo.length}段落を自動で訳し直し中…${round > 1 ? '（2回目）' : ''}`);
+      ui.toast(`${L().name}が残った${redo.length}段落を自動で訳し直し中…${round > 1 ? '（2回目）' : ''}`);
       const groups = makeChunks(redo.map(i => srcs[i].length), Math.min(c.chunk, 3000)).map(g => g.map(j => redo[j]));
       await pool(Math.max(1, +c.parallel || 1), groups.length, async g => {
         const ids = groups[g];
         const user = buildUser(c, whole, ref, 'この話の冒頭の訳文', ids.map(i => `[[${i + 1}]] ${srcs[i]}`).join('\n\n'));
-        user.msg += '\n\n（注意：前回これらの段落は韓国語のまま返ってきました。必ず各段落の先頭に [[番号]] を付け、韓国語を一文字も残さず日本語だけで訳してください）';
+        user.msg += `\n\n（注意：前回これらの段落は${L().name}のまま返ってきました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`;
         try {
-          const m = parseNum(await withRetry(mm => llm(c, SYSTEM_NUM, user, mm), modelList(c), (...a) => ui.toast(waitMsg(...a))));
+          const m = parseNum(await withRetry(mm => llm(c, sysNum(), user, mm), modelList(c), (...a) => ui.toast(waitMsg(...a))));
           for (const i of ids) {
             if (!m.has(i + 1)) continue;
             const t = clean(m.get(i + 1), srcs[i]);
-            if (t && (tr[i] == null || ko(t) < ko(tr[i]))) tr[i] = t;
+            if (t && (tr[i] == null || leftIn(t) < leftIn(tr[i]))) tr[i] = t;
           }
         } catch (e) {
           if (/^BLOCKED/.test(e.message)) ids.forEach(i => skip.add(i));
@@ -1463,7 +1683,7 @@ ${bodyHtml}
           }
         });
       };
-      const m = parseNum(await withRetry(mm => llm(c, SYSTEM_NUM, user, mm, onText), modelList(c), (...a) => ui.toast(waitMsg(...a))));
+      const m = parseNum(await withRetry(mm => llm(c, sysNum(), user, mm, onText), modelList(c), (...a) => ui.toast(waitMsg(...a))));
       srcs.forEach((src, i) => {
         if (m.has(i + 1)) liveData.map[src] = clean(m.get(i + 1), src);
         else liveQueue.set(src, batch[i][1]); // 抜けたら次でもう一度
@@ -1646,7 +1866,7 @@ ${bodyHtml}
     else recordScene(items.map(x => x.src), sceneLayout(items.map(x => x.el)));
     items.forEach(({ el, src }) => { applyLive(el, src); applyText(el, liveData.map[src], src); });
     liveErr = null;
-    const hasKo = src => liveData.map[src] == null || ko(liveData.map[src]) >= 2;
+    const hasKo = src => liveData.map[src] == null || leftIn(liveData.map[src]) > 0;
     let didWork = false;
     if (liveQueue.size) {
       setBusy(true); didWork = true;
@@ -1657,13 +1877,13 @@ ${bodyHtml}
         for (let round = 1; round <= 2 && !liveErr; round++) {
           const bad = items.filter(({ src }) => hasKo(src));
           if (!bad.length) break;
-          ui.toast(`韓国語が残った${bad.length}文を訳し直し中…${round > 1 ? '（2回目）' : ''}`);
+          ui.toast(`${L().name}が残った${bad.length}文を訳し直し中…${round > 1 ? '（2回目）' : ''}`);
           const before = {};
           bad.forEach(({ el, src }) => { before[src] = liveData.map[src]; delete liveData.map[src]; liveQueue.set(src, el); });
-          await runParallel('（注意：前回これらの文は韓国語が残りました。必ず各段落の先頭に [[番号]] を付け、韓国語を一文字も残さず日本語だけで訳してください）');
+          await runParallel(`（注意：前回これらの文は${L().name}が残りました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`);
           bad.forEach(({ el, src }) => {
             const old = before[src], cur = liveData.map[src];
-            if (old != null && (cur == null || ko(cur) > ko(old))) liveData.map[src] = old; // 前より悪くなったら前の訳を使う
+            if (old != null && (cur == null || leftIn(cur) > leftIn(old))) liveData.map[src] = old; // 前より悪くなったら前の訳を使う
             reapplyText(el, liveData.map[src], src);
           });
         }
@@ -1688,7 +1908,7 @@ ${bodyHtml}
     }
     const left = items.filter(({ src }) => hasKo(src)).length;
     if (liveErr) ui.toast('エラー: ' + liveErr.message + (left ? `（${left}文は未訳）` : ''), 6000);
-    else if (left) ui.toast(`完了（${left}文は韓国語のまま。メニューの「この話を翻訳し直す」で再挑戦できます）`, 6000);
+    else if (left) ui.toast(`完了（${left}文は${L().name}のまま。メニューの「この話を翻訳し直す」で再挑戦できます）`, 6000);
     else ui.toast(didWork ? `翻訳完了（この場面 ${items.length}文・これまで ${liveEntries().length}文）` : `保存済みの${provName()}版の訳を表示中`, 3000);
   }
 
@@ -1752,7 +1972,7 @@ ${bodyHtml}
       paras.push(para);
       lastG = scene;
     }
-    const title = document.title.replace(/\s+/g, ' ').trim() || 'translation';
+    const title = pageTitle().replace(/\s+/g, ' ').trim() || 'translation';
     const data = { v: 1, title, source: location.href, baseSize, paras };
     const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1893,6 +2113,7 @@ ${body}</main></body></html>`;
 
     const roots = findBodies();
     if (!roots.length) return ui.toast('本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」か「診断」を使ってください');
+    await prepBodies(cfg(), roots);
     // コメント・前後の話へのリンク・おすすめ作品などの段落は訳さない
     const els = roots.flatMap(r => collectParas(r).filter(el => !inNonBody(el, r) && !isUiWord(el.textContent)));
     copyCtx = null;
@@ -1911,7 +2132,7 @@ ${body}</main></body></html>`;
       const c0 = cfg();
       const bad = cached.filter(needsFix).length;
       // 自動修正は1話につき1回だけ（わざと韓国語の演出などで毎回料金がかかるのを防ぐ）
-      if (!bad || !c0.key || GM_getValue(key + ':fx')) return ui.toast(bad ? `保存済みの${provName()}版の訳を表示中（${bad}段落は韓国語のまま。「再翻訳」で訳し直せます）` : `保存済みの${provName()}版の訳を表示中`, bad ? 4000 : 2500);
+      if (!bad || !c0.key || GM_getValue(key + ':fx')) return ui.toast(bad ? `保存済みの${provName()}版の訳を表示中（${bad}段落は${L().name}のまま。「再翻訳」で訳し直せます）` : `保存済みの${provName()}版の訳を表示中`, bad ? 4000 : 2500);
       GM_setValue(key + ':fx', 1);
       // 保存済みの訳に韓国語が残っていたら、その段落だけ自動で直す
       setBusy(true);
@@ -1920,7 +2141,7 @@ ${body}</main></body></html>`;
         copyCtx.tr = tr0;
         const fx = await fixLeftovers(c0, els, srcs, tr0, src.length <= 30000 ? src : '', tr0.slice(0, 10).filter(Boolean).map(stripTags).join('\n\n'), new Set());
         GM_setValue(key, tr0);
-        ui.toast(fx.left ? `保存済みの訳を表示中（${fx.left}段落は韓国語のまま${fx.err ? '／エラー: ' + fx.err.message : ''}）` : '保存済みの訳の韓国語部分を直しました', 5000);
+        ui.toast(fx.left ? `保存済みの訳を表示中（${fx.left}段落は${L().name}のまま${fx.err ? '／エラー: ' + fx.err.message : ''}）` : '保存済みの訳の韓国語部分を直しました', 5000);
       } catch (e) {
         ui.toast('エラー: ' + e.message);
       } finally {
@@ -1975,7 +2196,7 @@ ${body}</main></body></html>`;
             ui.toast(`翻訳中… ${tr.filter(t => t != null).length} / ${els.length}段落`);
           }
         };
-        res = await withRetry(m => llm(c, SYSTEM_NUM, user, m, onText), modelList(c),
+        res = await withRetry(m => llm(c, sysNum(), user, m, onText), modelList(c),
           (...a) => ui.toast(waitMsg(...a)));
       } catch (e) {
         res = '';
@@ -2003,7 +2224,7 @@ ${body}</main></body></html>`;
       updateSheet(c, src, tr.filter(t => t != null).map(stripTags).join('\n\n'));
       const msgs = [];
       if (blocked) msgs.push(`${blocked}段落はブロックされ原文のまま`);
-      if (left) msgs.push(`${left}段落は韓国語のまま。「再翻訳」を試してください`);
+      if (left) msgs.push(`${left}段落は${L().name}のまま。「再翻訳」を試してください`);
       if (left && lastErr) msgs.push('エラー: ' + lastErr.message);
       ui.toast(msgs.length ? `完了（${msgs.join('／')}）` : `完了（${els.length}段落）`, msgs.length ? 6000 : 3000);
     } catch (e) {
@@ -2255,6 +2476,13 @@ ${body}</main></body></html>`;
               <option value="inplace">元のページに上書き（サイトの見た目のまま）</option>
               <option value="overlay">別画面で読む</option>
             </select></label>
+          <label>原文の言語（自動なら本文の文字から判定）
+            <select name="lang">
+              <option value="auto">自動</option>
+              <option value="ko">韓国語</option>
+              <option value="zh">中国語</option>
+              <option value="en">英語</option>
+            </select></label>
           <label>エンジン
             <select name="provider">
               <option value="gemini">Gemini</option>
@@ -2337,6 +2565,7 @@ ${body}</main></body></html>`;
       const c = cfg();
       draft = { keys: c.keys, models: c.models, fallbacks: c.fallbacks, sheetModels: c.sheetModels };
       curProv = c.provider;
+      f('lang').value = c.lang || 'auto';
       for (const k of ['mode', 'provider', 'key', 'model', 'fallback', 'baseUrl', 'chunk', 'parallel', 'glossary', 'instructions']) f(k).value = c[k];
       f('model').placeholder = MODELS[c.provider];
       f('fallback').placeholder = FALLBACKS[c.provider] || 'なし';
@@ -2449,12 +2678,13 @@ ${body}</main></body></html>`;
         const prev = GM_getValue('cfg', {});
         KZ_SET('cfg', {
           gistId: prev.gistId || '', gistToken: f('gistToken').value.trim(), autoBackup: f('autoBackup').checked,
-          mode: f('mode').value, provider: f('provider').value,
+          mode: f('mode').value, provider: f('provider').value, lang: f('lang').value,
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
           glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
+        resetLang();
         if (f('sheet').value.trim()) GM_setValue(sheetKey(), f('sheet').value.trim());
         else GM_deleteValue(sheetKey());
         settings(false); st.textContent = '設定を保存しました';
@@ -2526,26 +2756,29 @@ ${body}</main></body></html>`;
     };
   })();
 
-  let scanId = '', scanLeft = 0, scanHit = false;
+  let scanId = '', scanLeft = 0, scanHit = false, scanTick = 0;
   const snapDone = new Set();
   const check = () => {
     if ((inPlaceOn || textApplied.size) && !busy && !snapDone.has(pageId() + prov())) { snapDone.add(pageId() + prov()); snapLater(); }
     if (liveData && liveData.key !== liveKey()) clearOverlays(); // 別の話に移ったら重ね表示を外す
     if (!overlays.length && !inPlaceOn && !shownTranslated().length && ui.fabText() === '原') ui.fabLabel('訳');
     if (lastText && lastHref !== pageId()) setLast('');
-    if (inPlaceOn && !liveOn && ![...applied.keys()].some(e => e.isConnected)) { applied.clear(); inPlaceOn = false; ui.fabLabel('訳'); }
+    if (inPlaceOn && !liveOn && !(keep && keep.id === pageId()) && ![...applied.keys()].some(e => e.isConnected)) { applied.clear(); inPlaceOn = false; ui.fabLabel('訳'); }
     // Ridi・カカオページ以外の kakao.com では、iframeの中（ビューア）か、手動で有効にしたときだけ出す
     const reader = /ridibooks|page\.kakao/.test(location.host);
     const forced = GM_getValue('force:' + location.host, false);
     const active = inPlaceOn || textApplied.size > 0 || !!(liveData && liveData.key === liveKey() && liveEntries().length) || forced;
     let many;
-    if (reader) many = koDeep() > 20; // Ridi・カカオページは本文が少しずつ出る作りでも出す
+    if (mark().kztlEp) many = koNodes(markedBody()) > 0; // イカ墨ノベルなど：短い文でもボタンを出す
+    else if (siteBody()) many = koNodes(siteBody()) > 0; // 晋江など本文の場所が分かっているサイト
+    else if (reader) many = koDeep() > 20; // Ridi・カカオページは本文が少しずつ出る作りでも出す
     else {
       // その他のサイト：重くならないよう、ページが変わった直後の数回だけ韓国語の量を数える
       if (scanId !== pageId()) { scanId = pageId(); scanLeft = 6; scanHit = false; }
-      if (!scanHit && scanLeft > 0) { scanLeft--; scanHit = koDeep() > 300; }
+      if (!scanHit && (scanLeft > 0 || ++scanTick % 4 === 0)) { scanLeft = Math.max(0, scanLeft - 1); scanHit = koDeep() > 300; } // あとから本文が出るページも、ゆっくり見続ける
       many = scanHit;
     }
+    if (GM_getValue('hide:' + location.host, false) && !active) many = false; // このサイトでは出さない設定
     ui.showFab(active || many);
   };
   check();
@@ -2567,6 +2800,12 @@ ${body}</main></body></html>`;
     const k = 'force:' + location.host, v = !GM_getValue(k, false);
     GM_setValue(k, v);
     alert(v ? 'このサイトでは常にボタンを表示します' : '自動に戻しました');
+    check();
+  });
+  GM_registerMenuCommand('このサイトではボタンを出さない（切り替え）', () => {
+    const k = 'hide:' + location.host, v = !GM_getValue(k, false);
+    GM_setValue(k, v);
+    alert(v ? 'このサイトではボタンを出しません（メニューの「設定を開く」などはそのまま使えます）' : 'このサイトでもボタンを出すように戻しました');
     check();
   });
   GM_registerMenuCommand('診断（ボタンが出ないとき）', () => {
@@ -2641,6 +2880,14 @@ ${body}</main></body></html>`;
     KZ_SET('cfg', Object.assign({}, c, { provider: next }));
     alert(`${PROV_NAME[next]}に切り替えました。ページを開き直すので「訳」を押してください（${PROV_NAME[next]}版の訳があればそれが出ます）`);
     location.reload();
+  });
+  GM_registerMenuCommand('原文の言語を切り替え（自動→韓→中→英）', () => {
+    const c = GM_getValue('cfg', {}), order = ['auto', 'ko', 'zh', 'en'];
+    const next = order[(order.indexOf(c.lang || 'auto') + 1) % order.length];
+    KZ_SET('cfg', Object.assign({}, c, { lang: next }));
+    resetLang();
+    const now = curLang();
+    ui.toast(`原文の言語：${LANG_OPT[next]}${next === 'auto' ? `（今のページは${LANGS[now].name}と判定）` : ''}`, 3500);
   });
   GM_registerMenuCommand('作品ごとに全話まとめて保存（ZIP）', showWorkList);
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
