@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @namespace    ikasumi-novel-tl
 // @version      10.2
-// @description  Ridi / カカオページ / 晋江 / AO3 など、どのサイトでも韓国語・中国語・英語の本文を1話単位で文脈ごとLLM翻訳
+// @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
 // @match        *://*.page.kakao.com/*
