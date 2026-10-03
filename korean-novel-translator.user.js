@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.6
+// @version      10.5.8
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4804,6 +4804,35 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     setBadge(img, null);
     showItems(img, hit);
     closeD(d);
+    spillCover(img, hit);
+  }
+  // 画像の境目をまたぐ大きな文字：保存から出したときは、その画像の画素だけでは消し板が作れず、
+  // となりの画像に原文が残ってしまう。となりの画像もつないで、はみ出した部分まで消し直す（API代なし）
+  async function spillCover(img, items) {
+    const out = (items || []).filter((it) => it && (it.y < -0.01 || it.y + it.h > 1.01) && isFree(it));
+    if (!out.length) return;
+    const nb = neighbors(img);
+    const needP = out.some((it) => it.y < -0.01) && nb.prev, needN = out.some((it) => it.y + it.h > 1.01) && nb.next;
+    if (!needP && !needN) return;
+    let dA = null, dP = null, dN = null;
+    try {
+      dA = await getDrawable(img);
+      if (needP) { try { dP = await getDrawable(nb.prev); } catch (e) { dP = null; } }
+      if (needN) { try { dN = await getDrawable(nb.next); } catch (e) { dN = null; } }
+      if (!dP && !dN) return;
+      const W = dA.w, parts = [];
+      let vy = 0;
+      if (dP) { const vh = dP.h * (W / dP.w); parts.push({ d: dP, sy: 0, vy: 0, vh }); vy = vh; }
+      const offY = vy;
+      parts.push({ d: dA, sy: 0, vy, vh: dA.h }); vy += dA.h;
+      if (dN) { const vh = dN.h * (W / dN.w); parts.push({ d: dN, sy: 0, vy, vh }); vy += vh; }
+      const st = { W, H: vy, parts };
+      for (const it of out) {
+        try { delete it.cimg; delete it.crect; buildCover(it, st, W, dA.h, offY); } catch (e) { /* 作れなければそのまま */ }
+      }
+      const cur = lastItems.get(img);
+      if (cur && img.isConnected) render(img, cur);
+    } catch (e) { /* 読めない画像はそのまま */ } finally { [dA, dP, dN].forEach((d) => d && closeD(d)); }
   }
   function finishNew(r, items) {
     tally.fresh++;
@@ -4936,10 +4965,32 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
         }
       };
       launch();
+      // 重なった2つの読み取りの文が違う（大きな文字が区切りで分かれ、それぞれ一部だけ読めた）ときは、
+      // 長い方だけ残すと残りが消えてしまうので、2つを合わせた範囲を丸ごと読み直す
+      const conflicts = [];
+      const norm = (t) => String(t || '').replace(/[\s\-—―~～…\.!?！？、。,]/g, '');
       const addKept = (r) => {
         const di = kept.findIndex((k) => iouV(k, r) > 0.35);
-        if (di >= 0) { if (r.src.replace(/\s/g, '').length > kept[di].src.replace(/\s/g, '').length) kept[di] = r; } // 重なり部分の二重読み
-        else kept.push(r);
+        if (di >= 0) {
+          const k = kept[di], a = norm(k.src), b = norm(r.src);
+          if (a && b && !a.includes(b) && !b.includes(a)) {
+            conflicts.push({ x0: Math.min(k.x0, r.x0), x1: Math.max(k.x1, r.x1), y0: Math.min(k.y0, r.y0), y1: Math.max(k.y1, r.y1) });
+          }
+          if (b.length > a.length) kept[di] = r; // 重なり部分の二重読み
+        } else kept.push(r);
+      };
+      const fixedConflicts = new Set();
+      const fixConflicts = async () => {
+        for (let t = 0; t < 3 && conflicts.length; t++) {
+          for (const u of conflicts.splice(0)) {
+            const sig = [u.x0, u.x1, u.y0, u.y1].map((v) => Math.round(v / 8)).join(':');
+            // 合わせた範囲をほぼ丸ごと含む読み取りがもうあれば読み直さない（半分だけのものは数えない）
+            const whole = kept.some((k) => k.y0 <= u.y0 + EDGE && k.y1 >= u.y1 - EDGE && covers(k, u));
+            if (fixedConflicts.has(sig) || whole) continue;
+            fixedConflicts.add(sig);
+            await repair(u);
+          }
+        }
       };
       // 切れていた文字(f)を、丸ごと読めた文字(k)が含んでいるか
       const covers = (k, f) => {
@@ -4993,11 +5044,13 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
           }
           for (const f of upCuts.splice(0)) if (!kept.some((k) => covers(k, f))) await repair(f);
           for (const f of pendingCuts) if (!kept.some((k) => covers(k, f))) await repair(f);
+          await fixConflicts();
           pendingCuts = cutsHere;
           const frontier = Math.min(i + 1 < plan.length ? plan[i + 1].y : Infinity, ...cutsHere.map((f) => f.y0)); // 切れた文字の上までは確定
           flush(frontier);
         }
         for (const f of pendingCuts) if (!kept.some((k) => covers(k, f))) await repair(f);
+        await fixConflicts();
       } finally { stop = true; }
       flush(Infinity);
     } finally {
