@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.5
+// @version      10.5.6
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2737,6 +2737,14 @@ ${body}</main></body></html>`;
       if (['wt-redo', 'wt-redoAll'].includes(a)) { panel.hidden = true; fab.hidden = false; check(); }
       else setTimeout(fillWT, 800);
     }
+    // WTの設定は変えたらすぐ反映（保存ボタンを押し忘れても大丈夫なように）
+    let wtAutoTimer = 0;
+    form.querySelector('.cfg-wt').addEventListener('change', e => {
+      const n = e.target && e.target.name;
+      if (!n || !n.startsWith('wt_') || n === 'wt_imf') return;
+      clearTimeout(wtAutoTimer);
+      wtAutoTimer = setTimeout(() => { const api = wtReady(); if (api) { api.save(wtVals()); st.textContent = 'WTの設定を反映しました'; } }, 250);
+    });
     wf('ts').addEventListener('input', () => { wq('.wt-tsv').textContent = wf('ts').value; if (wtApi) wtApi.preview(wf('ts').value); });
     wf('imf').addEventListener('change', async e => {
       const inp = e.currentTarget || e.target; const file = inp.files && inp.files[0];
