@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.8
+// @version      10.5.14
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -416,26 +416,32 @@ const KZ_SET = GM_setValue;
   // ブラウザの通信（fetch）で直接ストリーミング受信。サイトの制限で使えなければ null を返して拡張経由に切り替える
   let noDirect = false;
   async function directStream(url, headers, body, progress) {
-    let r;
+    let r, timedOut = false, timer = 0;
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    // 何も届かないまま2分半たったら止める（電波の切り替えなどで固まらないように）
+    const arm = () => { clearTimeout(timer); if (ac) timer = setTimeout(() => { timedOut = true; ac.abort(); }, 150000); };
+    arm();
     try {
       r = await fetch(url, {
-        method: 'POST', mode: 'cors', credentials: 'omit',
+        method: 'POST', mode: 'cors', credentials: 'omit', signal: ac ? ac.signal : undefined,
         headers: Object.assign({ 'content-type': 'application/json' }, headers),
         body: JSON.stringify(body),
       });
-    } catch { noDirect = true; return null; } // ページ側の制限（CSPなど）で送れない
+    } catch { clearTimeout(timer); if (timedOut) throw new Error('タイムアウト'); noDirect = true; return null; } // ページ側の制限（CSPなど）で送れない
     const hs = [...r.headers].map(([k, v]) => k + ': ' + v).join('\n');
-    if (!r.body || !r.body.getReader) return { status: r.status, txt: await r.text(), headers: hs };
+    if (!r.body || !r.body.getReader) { try { return { status: r.status, txt: await r.text(), headers: hs }; } finally { clearTimeout(timer); } }
     const reader = r.body.getReader(), dec = new TextDecoder();
     let txt = '';
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        arm();
         txt += dec.decode(value, { stream: true });
         progress(txt);
       }
-    } catch (e) { throw new Error('通信エラー（' + (e && e.message) + '）'); }
+    } catch (e) { throw new Error(timedOut ? 'タイムアウト' : '通信エラー（' + (e && e.message) + '）'); }
+    finally { clearTimeout(timer); }
     return { status: r.status, txt, headers: hs };
   }
 
@@ -1299,6 +1305,7 @@ ${bodyHtml}
       el.setAttribute('data-kztl-tr', ''); // 訳文を表示中の印（ページ側が編集前に確認できるように）
       markJa(el);
     });
+    if (!applied.size) return; // まだ1段落も訳せていないときは「原」にしない
     inPlaceOn = true;
     ui.fabLabel('原');
     startKeep();
@@ -1421,7 +1428,7 @@ ${bodyHtml}
   const groupIds = new WeakMap();
   let groupSeq = 0;
   const liveKey = () => tagged('live:' + location.host + location.pathname);
-  const liveSave = () => { try { GM_setValue(liveKey(), liveData); } catch { /* 保存できなくても続ける */ } };
+  const liveSave = () => { try { if (liveData) GM_setValue(liveData.key || liveKey(), liveData); } catch { /* 保存できなくても続ける */ } };
 
   function groupOf(el) {
     const r = el.getRootNode();
@@ -2152,7 +2159,7 @@ ${body}</main></body></html>`;
         copyCtx.tr = tr0;
         const fx = await fixLeftovers(c0, els, srcs, tr0, src.length <= 30000 ? src : '', tr0.slice(0, 10).filter(Boolean).map(stripTags).join('\n\n'), new Set());
         GM_setValue(key, tr0);
-        ui.toast(fx.left ? `保存済みの訳を表示中（${fx.left}段落は${L().name}のまま${fx.err ? '／エラー: ' + fx.err.message : ''}）` : '保存済みの訳の韓国語部分を直しました', 5000);
+        ui.toast(fx.left ? `保存済みの訳を表示中（${fx.left}段落は${L().name}のまま${fx.err ? '／エラー: ' + fx.err.message : ''}）` : `保存済みの訳の${L().name}部分を直しました`, 5000);
       } catch (e) {
         ui.toast('エラー: ' + e.message);
       } finally {
@@ -2224,6 +2231,8 @@ ${body}</main></body></html>`;
     try {
       await doChunk(0);
       await pool(par, chunks.length - 1, i => doChunk(i + 1));
+      // 1段落も訳せなかった（キー間違いなど）ときは保存せずにエラーを出す
+      if (lastErr && !need.some(i => tr[i] != null)) throw lastErr;
 
       // 韓国語が残った段落・抜けた段落だけ自動で訳し直す
       const fx = await fixLeftovers(c, els, srcs, tr, whole, joinIdx(chunks[0]), blockedSet);
@@ -2247,9 +2256,11 @@ ${body}</main></body></html>`;
 
   // ---------- 訳の記録の書き出し・読み込み（ほかの端末へ移す） ----------
   const DATA_PREFIX = /^(cache2?:|live:|para:|sheet:|tail:|sel:|pos:|force:|ep:)/;
-  function backupJson() {
+  function backupJson(remote) {
     const data = {};
     for (const k of GM_listValues()) if (DATA_PREFIX.test(k)) data[k] = GM_getValue(k);
+    // クラウドにだけある記録（ほかの端末で訳した分など）も残す
+    if (remote && typeof remote === 'object') for (const [k, v] of Object.entries(remote)) if (DATA_PREFIX.test(k)) data[k] = mergeValue(k, data[k] ?? null, v);
     // 設定（用語集・指示・モデルなど）も一緒に。APIキーとGitHubの鍵は入れない
     const settings = Object.assign({}, GM_getValue('cfg', {}));
     delete settings.keys; delete settings.key; delete settings.gistToken; delete settings.gistId;
@@ -2266,24 +2277,45 @@ ${body}</main></body></html>`;
       onerror: () => ng(new Error('通信エラー')), ontimeout: () => ng(new Error('時間切れ')), timeout: 60000,
     }));
   }
+  // 自分のGistからバックアップを探す（新しい端末でも、前のバックアップに足していく）
+  async function findGist(token) {
+    const list = JSON.parse(await gh('GET', 'https://api.github.com/gists?per_page=100', token));
+    const g = Array.isArray(list) ? list.find(x => x && x.files && x.files[GIST_FILE]) : null;
+    return g ? g.id : '';
+  }
+  async function readGist(id, token) {
+    const g = JSON.parse(await gh('GET', 'https://api.github.com/gists/' + id, token));
+    const file = g.files && g.files[GIST_FILE];
+    if (!file) return null;
+    return file.truncated ? await gh('GET', file.raw_url, token) : file.content;
+  }
+  let backupRunning = false;
   async function backupNow(manual) {
     const c = GM_getValue('cfg', {});
     const token = (c.gistToken || '').trim();
     if (!token) { if (manual) ui.toast('設定でGitHubのトークンを入れてください', 4000); return; }
-    const { json, n } = backupJson();
-    const body = { description: '韓国小説 丸ごと翻訳のバックアップ', files: { [GIST_FILE]: { content: json } } };
+    if (backupRunning) { if (manual) ui.toast('クラウドに保存中です', 2000); return; }
+    backupRunning = true;
+    backupDirty = false; // 送っている間に増えた訳は、次の回で送る
     try {
-      if (c.gistId) await gh('PATCH', 'https://api.github.com/gists/' + c.gistId, token, body);
-      else {
-        const r = JSON.parse(await gh('POST', 'https://api.github.com/gists', token, Object.assign({ public: false }, body)));
-        KZ_SET('cfg', Object.assign({}, GM_getValue('cfg', {}), { gistId: r.id }));
+      let id = c.gistId || await findGist(token);
+      // クラウドの記録と合わせてから上書きする（ほかの端末の訳を消さない）
+      let remote = null;
+      if (id) {
+        try { const t = await readGist(id, token); remote = t ? JSON.parse(t).data : null; }
+        catch (e) { if (/^404/.test(e.message)) id = ''; else throw e; }
       }
-      backupDirty = false;
+      const { json, n } = backupJson(remote);
+      const body = { description: '韓国小説 丸ごと翻訳のバックアップ', files: { [GIST_FILE]: { content: json } } };
+      if (id) await gh('PATCH', 'https://api.github.com/gists/' + id, token, body);
+      else id = JSON.parse(await gh('POST', 'https://api.github.com/gists', token, Object.assign({ public: false }, body))).id;
+      if (id !== c.gistId) KZ_SET('cfg', Object.assign({}, GM_getValue('cfg', {}), { gistId: id }));
       KZ_SET('backupAt', Date.now());
       if (manual) ui.toast(`クラウドに保存しました（${n}件）`, 3000);
     } catch (e) {
+      backupDirty = true;
       if (manual) ui.toast('クラウド保存に失敗：' + e.message, 5000);
-    }
+    } finally { backupRunning = false; }
   }
   function scheduleBackup() {
     clearTimeout(backupTimer);
@@ -2300,16 +2332,12 @@ ${body}</main></body></html>`;
     try {
       let id = c.gistId;
       if (!id) { // 新しい端末ではIDが無いので、自分のGistから探す
-        const list = JSON.parse(await gh('GET', 'https://api.github.com/gists?per_page=100', token));
-        const g = list.find(x => x.files && x.files[GIST_FILE]);
-        if (!g) return ui.toast('クラウドにバックアップが見つかりません', 4000);
-        id = g.id;
+        id = await findGist(token);
+        if (!id) return ui.toast('クラウドにバックアップが見つかりません', 4000);
         KZ_SET('cfg', Object.assign({}, GM_getValue('cfg', {}), { gistId: id }));
       }
-      const g = JSON.parse(await gh('GET', 'https://api.github.com/gists/' + id, token));
-      const file = g.files && g.files[GIST_FILE];
-      if (!file) return ui.toast('クラウドにバックアップが見つかりません', 4000);
-      const text = file.truncated ? await gh('GET', file.raw_url, token) : file.content;
+      const text = await readGist(id, token);
+      if (!text) return ui.toast('クラウドにバックアップが見つかりません', 4000);
       importData(text);
     } catch (e) { ui.toast('クラウドから読み込めません：' + e.message, 5000); }
   }
@@ -2364,7 +2392,7 @@ ${body}</main></body></html>`;
       setMsg = '・設定も反映';
     }
     liveData = null;
-    ui.toast(`訳の記録を読み込みました（${n}件${setMsg}）。APIキーだけ入れ直してください`, 5000);
+    ui.toast(`訳の記録を読み込みました（${n}件${setMsg}）。APIキーは含まれていません`, 5000);
   }
 
   // ---------- UI ----------
@@ -2638,6 +2666,7 @@ ${body}</main></body></html>`;
       draft.fallbacks[curProv] = f('fallback').value.trim();
       draft.sheetModels[curProv] = f('sheetModel').value.trim();
     };
+    let sheetLoaded = '';
     function settings(show) {
       if (!show && !form.hidden && typeof applyMode === 'function') applyMode(curTab); // 閉じたときのタブでモードを決める
       form.hidden = !show; text.hidden = show;
@@ -2655,11 +2684,12 @@ ${body}</main></body></html>`;
       f('gistToken').value = c.gistToken || ''; f('autoBackup').checked = c.autoBackup !== false;
       f('autoSheet').checked = !!c.autoSheet;
       f('quickStart').checked = c.quickStart !== false;
-      f('sheet').value = getSheet();
+      f('sheet').value = sheetLoaded = getSheet();
       $('.sheet-title').textContent = `この作品のメモ【${workName().slice(0, 30) || workKey()}】`;
       f('sheetModel').value = c.sheetModel;
       f('sheetModel').placeholder = SHEET_MODELS[c.provider] || '翻訳と同じモデル';
       fillModels();
+      setMode(GM_getValue(wtKey(), false) ? 'wt' : 'novel'); // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
     }
 
     // モデル一覧：Geminiはキーがあれば実際に使えるものを取得、なければ既定の候補
@@ -2671,7 +2701,7 @@ ${body}</main></body></html>`;
       const base = [...new Set([MODELS[prov], ...(FALLBACKS[prov] || '').split(/[,\s]+/), ...(CANDIDATES[prov] || [])].filter(Boolean))];
       put(base, '（選ぶとモデル名に入ります）');
       if (prov !== 'gemini' || !key) return;
-      try { put(await listGeminiModels(key), '（選ぶとモデル名に入ります・取得済み）'); }
+      try { const list = await listGeminiModels(key); if (f('provider').value === 'gemini') put(list, '（選ぶとモデル名に入ります・取得済み）'); }
       catch { /* 取得できなければ既定の候補のまま */ }
     }
     f('importFile').addEventListener('change', async e => {
@@ -2718,11 +2748,19 @@ ${body}</main></body></html>`;
       const v = api ? api.load() : wtStoredVals();
       WT_VAL.forEach(k => { if (v[k] != null) wf(k).value = v[k]; });
       WT_CHK.forEach(k => { wf(k).checked = !!v[k]; });
+      wtMemoBase = { memo: wf('memo').value, story: wf('story').value };
       wq('.wt-tsv').textContent = wf('ts').value;
       wq('.wt-work').hidden = !api;
       if (api) { wq('.wt-wn').textContent = v.wn || 'この作品のメモ'; wq('.wt-memost').textContent = v.memost || ''; }
     }
-    const wtVals = () => { const o = {}; WT_VAL.forEach(k => { o[k] = wf(k).value; }); WT_CHK.forEach(k => { o[k] = wf(k).checked; }); return o; };
+    let wtMemoBase = { memo: null, story: null };
+    // メモ・あらすじは手で書き換えたときだけ渡す（開いている間に裏で更新された新しいメモを、古い内容で上書きしない）
+    const wtVals = () => {
+      const o = {}; WT_VAL.forEach(k => { o[k] = wf(k).value; }); WT_CHK.forEach(k => { o[k] = wf(k).checked; });
+      if (o.memo === wtMemoBase.memo) delete o.memo;
+      if (o.story === wtMemoBase.story) delete o.story;
+      return o;
+    };
     function wtAction(a) {
       const api = wtReady();
       if (!api) return ui.toast('このページではWTの設定を変えられません（ページの中の小さな画面のため）', 4000);
@@ -2824,8 +2862,11 @@ ${body}</main></body></html>`;
           glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
-        if (f('sheet').value.trim()) GM_setValue(sheetKey(), f('sheet').value.trim());
-        else GM_deleteValue(sheetKey());
+        // 作品メモは手で直したときだけ保存（開いている間に裏で更新された新しいメモを古い内容で上書きしない）
+        if (f('sheet').value !== sheetLoaded) {
+          if (f('sheet').value.trim()) GM_setValue(sheetKey(), f('sheet').value.trim());
+          else GM_deleteValue(sheetKey());
+        }
         settings(false); st.textContent = '設定を保存しました';
       }
     };
@@ -2851,6 +2892,7 @@ ${body}</main></body></html>`;
     };
     press(root); if (pd !== root) press(pd);
     const toastEl = $('.toast');
+    toastEl.addEventListener('click', () => { clearTimeout(toastTimer); toastEl.hidden = true; });
     const cardEl = $('.card'), cardBody = $('.card-body');
     $('.card-x').addEventListener('click', () => { cardEl.hidden = true; });
     let hasCopy = false;
@@ -2867,6 +2909,8 @@ ${body}</main></body></html>`;
         clearTimeout(toastTimer);
         if (toastEl.hidden) { toastEl.style.animation = 'none'; void toastEl.offsetWidth; toastEl.style.animation = ''; }
         toastEl.textContent = m; toastEl.hidden = false;
+        // エラーなどは少し長めに出して消す（タップでも消える）
+        if (!hideMs && /エラー|失敗|見つかりません|読み込めません|できません/.test(m)) hideMs = 8000;
         if (hideMs) toastTimer = setTimeout(() => { toastEl.hidden = true; }, hideMs);
       },
       fabText: () => fab.textContent,
@@ -2939,7 +2983,7 @@ ${body}</main></body></html>`;
     // 漫画のページ：小説の「訳」の場所にWTボタンを置き、設定ボタンは残す
     ui.wtLayout(wtPage);
     ui.showFab(wtPage || active || many);
-    if (wtPage) { const r = ui.mainRect(); if (r && r.width) wtApi.placeAt(r); }
+    if (wtPage) syncWT();
   };
   check();
   setInterval(check, 3000);
@@ -3036,7 +3080,7 @@ ${body}</main></body></html>`;
   GM_registerMenuCommand('訳の記録を書き出す（ほかの端末へ）', exportData);
   GM_registerMenuCommand('エンジンを切り替え（Claude ⇄ Gemini）', () => {
     const c = GM_getValue('cfg', {});
-    const next = (c.provider || 'gemini') === 'claude' ? 'gemini' : 'claude';
+    const next = (c.provider || 'gemini') === 'gemini' ? 'claude' : 'gemini';
     KZ_SET('cfg', Object.assign({}, c, { provider: next }));
     alert(`${PROV_NAME[next]}に切り替えました。ページを開き直すので「訳」を押してください（${PROV_NAME[next]}版の訳があればそれが出ます）`);
     location.reload();
@@ -3054,7 +3098,8 @@ ${body}</main></body></html>`;
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
   GM_registerMenuCommand('保存済みの訳を全削除', () => {
-    const keys = GM_listValues().filter(k => k.startsWith('cache') || k.startsWith('live:') || k.startsWith('para:'));
+    if (!confirm('この端末に保存した小説の訳を全部消します（作品メモ・設定は残ります）。元に戻せません。よろしいですか？')) return;
+    const keys = GM_listValues().filter(k => k.startsWith('cache') || k.startsWith('live:') || k.startsWith('para:') || k.startsWith('ep:') || k.startsWith('tail:'));
     keys.forEach(GM_deleteValue);
     alert(keys.length + '件削除しました');
   });
@@ -3062,9 +3107,20 @@ ${body}</main></body></html>`;
   // ================= WT（まんが・ウェブトゥーン）翻訳モード =================
   // 画像の吹き出しを読み取って、訳を吹き出しの上に重ねる。サイトごとにオン／オフ（メニュー・設定から）
   const wtKey = () => 'wt:' + location.hostname;
-  const novelGeminiKey = () => { try { const c = cfg(); return (c.keys && c.keys.gemini) || c.freeKey || ''; } catch { return ''; } };
+  const novelGeminiKey = () => { try { const c = cfg(); return (c.keys && c.keys.gemini) || ''; } catch { return ''; } };
   const novelGistToken = () => { try { return GM_getValue('cfg', {}).gistToken || ''; } catch { return ''; } };
-  var wtStarted = false, wtApi = null, wtSeenPage = '', wtPageNow = false; // var：上の check() から先に参照されるため
+  var wtStarted = false, wtApi = null, wtSeenPage = '', wtPageNow = false;
+  // WTボタンを⚙の横にぴったり合わせる。画面の大きさが変わったとき（アドレスバーの出し入れ・回転）もすぐ合わせ直す
+  function syncWT() {
+    if (!wtApi || !wtPageNow) return;
+    const r = ui.mainRect();
+    if (r && r.width) wtApi.placeAt(r);
+  }
+  let syncRaf = 0;
+  const syncSoon = () => { cancelAnimationFrame(syncRaf); syncRaf = requestAnimationFrame(() => { syncWT(); setTimeout(syncWT, 250); }); };
+  addEventListener('resize', syncSoon);
+  addEventListener('orientationchange', syncSoon);
+  if (window.visualViewport) { visualViewport.addEventListener('resize', syncSoon); } // var：上の check() から先に参照されるため
   // WTが動いていないページ（iframeの中など）でも、保存してある設定は表示できるように
   function wtStoredVals() {
     let S = {};
@@ -3139,7 +3195,7 @@ ${body}</main></body></html>`;
   const keyOf = () => (S.apiKey || novelGeminiKey() || '').trim();
   const tokOf = () => (S.gistToken || novelGistToken() || '').trim();
 
-  // 翻訳キャッシュ（画像URLごと、最大300件）
+  // 翻訳キャッシュ（画像ごと、最大20000件。古いものから消す）
   // 翻訳の保存：画像の「中身」から作った指紋で保存する。
   // RidiのようにURLが毎回変わる(blob:)サイトでも、同じ画像なら再翻訳しない（API代の節約）
   const CIDX = 'ezc_cidx', CMAX = 20000;
@@ -3151,6 +3207,12 @@ ${body}</main></body></html>`;
     } catch (e) {}
   }
   function cacheGet(k) { return k ? store.get('ezc_c:' + k, null) : null; }
+  // 保存した順番（新しいほど大きい）
+  let recency = null;
+  function recencyMap() {
+    if (!recency) { recency = new Map(); store.get(CIDX, []).forEach((k, i) => recency.set(k, i)); }
+    return recency;
+  }
   function cachePut(k, v) {
     if (!k) return;
     store.set('ezc_c:' + k, v);
@@ -3158,8 +3220,9 @@ ${body}</main></body></html>`;
     const i = idx.indexOf(k);
     if (i >= 0) idx.splice(i, 1);
     idx.push(k);
-    while (idx.length > CMAX) del('ezc_c:' + idx.shift());
+    while (idx.length > CMAX) { const o = idx.shift(); del('ezc_c:' + o); del('ezc_t:' + o); del('ezc_e:' + o); }
     store.set(CIDX, idx);
+    recency = null;
     markDirty();
   }
   // 別名：画像のURL・指紋 → 保存先。作品の見分け方が変わったり、画像の画素がわずかに変わったりしても見つけられる
@@ -3216,9 +3279,13 @@ ${body}</main></body></html>`;
     return hIdxMem.get(k);
   }
   // 似ている順に候補の保存先を返す（本当に同じ画像かは、あとで縮小画像で確かめる）
+  // 似ている候補が複数あるときは、新しく保存した方を先に試す。
+  // （カカオなどは読み込むたびに見えない透かしで指紋が変わるので、訳し直した新しい訳より古い訳が先に見つかることがあった）
   function hIndexKeys(d) {
     if (!d.rh) return [];
-    return hIndexArr(d).map((e) => [hamming(e.h, d.rh), e.k]).filter((x) => x[0] <= 24).sort((a, b) => a[0] - b[0]).slice(0, 5).map((x) => x[1]);
+    const rank = recencyMap();
+    return hIndexArr(d).map((e) => [hamming(e.h, d.rh), e.k]).filter((x) => x[0] <= 24)
+      .sort((a, b) => (rank.get(b[1]) ?? -1) - (rank.get(a[1]) ?? -1) || a[0] - b[0]).slice(0, 5).map((x) => x[1]);
   }
   // ---------- 本当に同じ画像かの確認 ----------
   // 幅16マスの白黒の縮小画像（明るさ16段階）。透かし・JPEGの劣化ではほぼ変わらず、
@@ -3242,7 +3309,7 @@ ${body}</main></body></html>`;
     return out;
   }
   function thumbMatch(a, b) {
-    if (!a || !b) return false;
+    if (!a || !b) return null; // 縮小画像が無い（バックアップから戻した直後など）ときは比べられない
     if (a.length !== b.length) return null; // 作り方が違う（前の版）ので比べられない
     let tot = 0;
     for (let i = 0; i < a.length; i++) {
@@ -3385,10 +3452,12 @@ ${body}</main></body></html>`;
     if (!key) return;
     const k = pageKey();
     const p = store.get(k, null) || { title: document.title, url: location.href, idx: {} };
+    const i = imgIndex(img), old = p.idx[i];
+    const same = old && old.key === key && old.w === d.w && old.h === d.h;
     p.title = document.title; p.at = Date.now(); p.wk = wkh();
-    p.idx[imgIndex(img)] = { w: d.w, h: d.h, key, dh: d.dh };
+    p.idx[i] = { w: d.w, h: d.h, key, dh: d.dh };
     store.set(k, p);
-    markDirty();
+    if (!same) markDirty(); // 保存から表示しただけなら、バックアップは送り直さない
   }
 
   // この話で訳したセリフ（原文 → 訳）を読む順に記録。次の話への引き継ぎと翻訳メモの更新に使う
@@ -3433,9 +3502,10 @@ ${body}</main></body></html>`;
   }
 
   // 作品の翻訳メモ：人物の訳名・性別・一人称・口調、用語。この話の訳を元にGeminiが裏で更新する
-  let memoBusy = false;
+  let memoBusy = false, memoFailAt = 0;
   async function updateMemo(manual) {
     if ((!S.autoMemo && !manual) || memoBusy) return;
+    if (!manual && Date.now() - memoFailAt < 5 * 60000) return; // 失敗した直後は、画像ごとに何度も頼まない（翻訳の回数制限を食わないように）
     if (!keyOf()) { if (manual) toast('APIキーを入れてね'); return; }
     const pages = pendingMemoPages();
     const lines = pages.flatMap((x) => x.rest);
@@ -3470,8 +3540,9 @@ ${w.story || '（なし）'}
       const w2 = getWork(); w2.memo = memo; if (story) w2.story = story; w2.memoAt = Date.now(); delete w2.memoErr; putWork(w2);
       for (const x of pages) { const p2 = store.get(x.k, null); if (p2) { p2.memoAt = x.n; store.set(x.k, p2); } }
       if (manual) toast('翻訳メモを更新した');
-      if (!$('sheet').hidden) { $('memo').value = memo; if (story) $('story').value = story; }
+      $('memo').value = memo; if (story) $('story').value = story; // 設定欄も新しいメモにしておく（古い内容で上書きしないように）
     } catch (e) {
+      memoFailAt = Date.now();
       const w3 = getWork(); w3.memoErr = String(e.message || e).slice(0, 120); putWork(w3);
       if (manual) toast('メモの更新に失敗：' + w3.memoErr);
     }
@@ -3493,12 +3564,27 @@ ${w.story || '（なし）'}
     if (typeof GM_listValues === 'function') return GM_listValues().filter((k) => DATA_PREFIX.test(k));
     return Object.keys(localStorage).filter((k) => DATA_PREFIX.test(k));
   }
-  function backupJson(onlyWork) {
+  function backupJson(onlyWork, remote) {
     const data = {};
     // 見た目の索引・別名・縮小画像は端末で作り直せるので、バックアップには入れない（大きくなりすぎるため）
     for (const k of onlyWork ? workDataKeys(onlyWork) : dataKeys()) {
       if (/^ezc_(h|a|t):/.test(k)) continue;
       const v = store.get(k, null); if (v != null) data[k] = v;
+    }
+    // クラウドにだけある記録（ほかの端末で訳した分など）も残す。両方にあるものはこの端末を優先して合わせる
+    if (remote && typeof remote === 'object') {
+      for (const [k, rv] of Object.entries(remote)) {
+        if (!DATA_PREFIX.test(k) || /^ezc_(h|a|t):/.test(k) || rv == null) continue;
+        const cur = data[k];
+        if (cur == null) { data[k] = rv; continue; }
+        if (k.startsWith('ezc_p:') && typeof cur === 'object') {
+          const v = Object.assign({}, cur, { idx: Object.assign({}, rv.idx || {}, cur.idx || {}) });
+          if ((rv.lines || []).length > (cur.lines || []).length) v.lines = rv.lines;
+          data[k] = v;
+        } else if (k.startsWith('ezc_w:') && typeof cur === 'object') {
+          data[k] = Object.assign({}, cur, { eps: Object.assign({}, rv.eps || {}, cur.eps || {}) });
+        }
+      }
     }
     const settings = Object.assign({}, S);
     delete settings.apiKey; delete settings.gistToken; delete settings.gistId; delete settings.pos;
@@ -3515,35 +3601,53 @@ ${w.story || '（なし）'}
       throw new Error(r.status + ' ' + (r.responseText || '').slice(0, 120));
     });
   }
+  async function findGist() {
+    const list = JSON.parse(await gh('GET', 'https://api.github.com/gists?per_page=100'));
+    const g = Array.isArray(list) ? list.find((x) => x && x.files && x.files[GIST_FILE]) : null;
+    return g ? g.id : '';
+  }
+  async function readGist(id) {
+    const g = JSON.parse(await gh('GET', 'https://api.github.com/gists/' + id));
+    const file = g.files && g.files[GIST_FILE];
+    if (!file) return null;
+    return file.truncated ? await gh('GET', file.raw_url) : file.content;
+  }
+  let backupRunning = false;
   async function backupNow(manual) {
     if (!tokOf()) { if (manual) toast('設定でGitHubのトークンを入れてね'); return; }
-    const { json, n } = backupJson();
-    const body = { description: 'まんが吹き出し翻訳のバックアップ', files: { [GIST_FILE]: { content: json } } };
+    if (backupRunning) { if (manual) toast('クラウドに保存中'); return; }
+    backupRunning = true;
+    backupDirty = false; // 送っている間に増えた訳は、次の回で送る
     try {
-      if (S.gistId) await gh('PATCH', 'https://api.github.com/gists/' + S.gistId, body);
-      else {
-        const r = JSON.parse(await gh('POST', 'https://api.github.com/gists', Object.assign({ public: false }, body)));
-        S.gistId = r.id; saveS();
+      let id = S.gistId || await findGist();
+      // クラウドの記録と合わせてから上書きする（ほかの端末の訳を消さない）
+      let remote = null;
+      if (id) {
+        try { const t = await readGist(id); remote = t ? JSON.parse(t).data : null; }
+        catch (e) { if (/^404/.test(e.message)) id = ''; else throw e; }
       }
-      backupDirty = false;
+      const { json, n } = backupJson(null, remote);
+      const body = { description: 'まんが吹き出し翻訳のバックアップ', files: { [GIST_FILE]: { content: json } } };
+      if (id) await gh('PATCH', 'https://api.github.com/gists/' + id, body);
+      else id = JSON.parse(await gh('POST', 'https://api.github.com/gists', Object.assign({ public: false }, body))).id;
+      if (id !== S.gistId) { S.gistId = id; saveS(); }
       if (manual) toast(`クラウドに保存した（${n}件）`);
     } catch (e) {
+      backupDirty = true;
       if (manual) toast('クラウド保存に失敗：' + e.message);
-    }
+    } finally { backupRunning = false; }
   }
   async function restoreFromCloud() {
     if (!tokOf()) return toast('設定でGitHubのトークンを入れてね');
     try {
       if (!S.gistId) { // 新しい端末ではIDが無いので、自分のGistから探す
-        const list = JSON.parse(await gh('GET', 'https://api.github.com/gists?per_page=100'));
-        const g = list.find((x) => x.files && x.files[GIST_FILE]);
-        if (!g) return toast('クラウドにバックアップが見つからない');
-        S.gistId = g.id; saveS();
+        const id = await findGist();
+        if (!id) return toast('クラウドにバックアップが見つからない');
+        S.gistId = id; saveS();
       }
-      const g = JSON.parse(await gh('GET', 'https://api.github.com/gists/' + S.gistId));
-      const file = g.files && g.files[GIST_FILE];
-      if (!file) return toast('クラウドにバックアップが見つからない');
-      importData(file.truncated ? await gh('GET', file.raw_url) : file.content);
+      const text = await readGist(S.gistId);
+      if (!text) return toast('クラウドにバックアップが見つからない');
+      importData(text);
     } catch (e) { toast('クラウドから読み込めない：' + e.message); }
   }
   function exportData(onlyWork) {
@@ -3579,6 +3683,7 @@ ${w.story || '（なし）'}
       n++;
     }
     store.set(CIDX, idx);
+    recency = null;
     let setMsg = '';
     if (j.settings && typeof j.settings === 'object') {
       const inc = Object.assign({}, j.settings);
@@ -3720,6 +3825,8 @@ ${w.story || '（なし）'}
 - 大きな文字を1文字ずつ縦に並べた縦書きの文も、1つの文なら1項目。列が複数あって1つの文になっていれば、読む順につないで1項目にし、box_2d は全部の列を囲む。
 - color: 原文の文字色を #RRGGBB で。stroke: 原文の文字にフチ（縁取り）があればその色を #RRGGBB で、なければ空文字。
 - 訳は漫画として自然な話し言葉にし、キャラの口調・感情・語尾のニュアンスを残す。説明的にしない。長さは原文と同程度に。
+- 人名：韓国の人名は姓も名も全部カタカナにする（姓だけ漢字にしない。例：김독자→キム・ドクチャ、이현성→イ・ヒョンソン）。姓と名の間は「・」。中国の人名は日本の漢字（新字体）。英語の人名はカタカナ。
+- 会社・組織・場所・技・アイテムなど意味のある固有名詞は、音をそのままカタカナにせず意味が伝わる日本語にする（例：백일몽→白日夢）。
 - 原文がすでに${t}なら tr は原文のまま。
 - 日本語・中国語の訳では単語の間に空白を入れない。改行は意味の切れ目で入れてよい（原文の改行位置に合わせなくていい）。
 - 読む順に並べる。文字が無ければ空配列。`;
@@ -4287,14 +4394,14 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
 
   function placeOverlay(img, ov) {
     if (!img.isConnected) { ov.remove(); overlays.delete(img); return; }
-    ov.style.display = '';
-    const ir = img.getBoundingClientRect();
-    ov.style.left = '0px'; ov.style.top = '0px';
-    const or = ov.getBoundingClientRect();
-    ov.style.left = (ir.left - or.left) + 'px';
-    ov.style.top = (ir.top - or.top) + 'px';
-    ov.style.width = ir.width + 'px';
-    ov.style.height = ir.height + 'px';
+    if (ov.style.display) ov.style.display = '';
+    // 位置は層（ページ左上）からの差で決める。変わっていなければ書き込まない（スクロール中のカクつき防止）
+    const ir = img.getBoundingClientRect(), lr = (ov.parentNode || getLayer()).getBoundingClientRect();
+    const st = ov.style, L = (ir.left - lr.left) + 'px', T = (ir.top - lr.top) + 'px', W = ir.width + 'px', H = ir.height + 'px';
+    if (st.left !== L) st.left = L;
+    if (st.top !== T) st.top = T;
+    if (st.width !== W) st.width = W;
+    if (st.height !== H) st.height = H;
     // 大きさが変わったら（読み込み中の仮の高さ→本当の高さ など）文字サイズを測り直す
     const fw = +ov.dataset.fw || 0, fh = +ov.dataset.fh || 0;
     if (ir.width > 0 && ir.height > 0 && (ov.dataset.fitted !== '1' || Math.abs(ir.width - fw) > 2 || Math.abs(ir.height - fh) > 2)) fitAll(ov);
@@ -4320,11 +4427,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       getLayer().appendChild(ov);
       overlays.set(img, ov);
       ro.observe(img);
-    }
+    } else if (!ov.isConnected) getLayer().appendChild(ov); // サイトが画面を作り直したときは付け直す
     return ov;
   }
 
   function setBadge(img, text, onTap) {
+    if (text && !onTap && !S.debug && /^(翻訳中|翻訳待ち|回数制限のため待機中)/.test(text)) text = null; // 途中経過は画像に出さない（WTボタンで分かる）
     const ov = getOverlay(img);
     let b = ov.querySelector('.ezc-badge');
     if (!text) { if (b) b.remove(); return; }
@@ -4673,6 +4781,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     // 漫画のページ（大きな画像が画面の半分以上）と判断できるまでは送らない：小説の挿絵・表紙で料金がかからないように
     if (!force && doneSrc.get(img) === src) return;
     if (!force && Date.now() - (failedAt.get(img) || 0) < 10 * 60000) return;
+    if (!force && !pageActive() && waiting.has(img) && waitSrc.get(img) === src) return; // ボタン待ち：調べ直さない
     queued.add(img);
     if (force) forced.add(img); else forced.delete(img);
     queue.push(img);
@@ -4952,7 +5061,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       const runForced = runs.some((p) => forced.has(p)), runPid = pid();
       const readChunk = async (c) => {
         // 途中で止めたら、残りの区切りは一時停止。再開したら続きから送る（読み終わった区切りはそのまま使う）
-        if (!pageActive() && !runForced) await waitResume(runPid);
+        if (!pageActive()) await waitResume(runPid);
         return mergeRaw(normalizeRaw(await callGemini([await chunkToB64(st, c)], onWait), c), W);
       };
       const defs = plan.map(() => { let res, rej; const p = new Promise((a, b) => { res = a; rej = b; }); p.catch(() => {}); return { p, res, rej }; });
@@ -5043,13 +5152,13 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
             addKept(r);
           }
           for (const f of upCuts.splice(0)) if (!kept.some((k) => covers(k, f))) await repair(f);
-          for (const f of pendingCuts) if (!kept.some((k) => covers(k, f))) await repair(f);
+          for (const f of pendingCuts) if (!kept.some((k) => covers(k, f))) { await repair(f); if (!kept.some((k) => covers(k, f))) addKept(f); } // 読み直せなくても、切れた分は捨てずに出す
           await fixConflicts();
           pendingCuts = cutsHere;
           const frontier = Math.min(i + 1 < plan.length ? plan[i + 1].y : Infinity, ...cutsHere.map((f) => f.y0)); // 切れた文字の上までは確定
           flush(frontier);
         }
-        for (const f of pendingCuts) if (!kept.some((k) => covers(k, f))) await repair(f);
+        for (const f of pendingCuts) if (!kept.some((k) => covers(k, f))) { await repair(f); if (!kept.some((k) => covers(k, f))) addKept(f); }
         await fixConflicts();
       } finally { stop = true; }
       flush(Infinity);
@@ -5077,7 +5186,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
         let { img, r } = scanWait.shift();
         const src = img.currentSrc || img.src;
         // 止めたら順番待ちも一時停止。再開したらそのまま送る。別の話に移ったら待つのをやめる
-        if (!pageActive() && !forced.has(img)) {
+        if (!pageActive()) {
           try { await waitResume(pid()); } catch (e) { waiting.add(img); setBadge(img, null); continue; }
         }
         if (!img.isConnected || (doneSrc.get(img) === src && !forced.has(img))) continue; // 前のまとまりで訳し済み
@@ -5100,7 +5209,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
           for (const p of runs) {
             if (doneSrc.get(p) === (p.currentSrc || p.src) && !forced.has(p)) continue; // 表示まで済んだ画像はそのまま
             failedAt.set(p, Date.now()); // 失敗した画像は、スクロールのたびに自動で再挑戦しない（API代の節約）。タップで再試行
-            setBadge(p, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(p, null); failedAt.delete(p); enqueue(p, true); });
+            setBadge(p, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(p, null); failedAt.delete(p); activate(); enqueue(p, true); });
           }
           if (/APIキー/.test(e.message)) toast(e.message);
         } finally {
@@ -5127,10 +5236,14 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
           const r = await resolve(img);
           if (r.hit) finishHit(r);
           else if (pageActive() || forced.has(img)) requestScan(img, r);
-          else { waiting.add(img); doneSrc.delete(img); } // ボタンを押すまで待つ
+          else { waiting.add(img); waitSrc.set(img, img.currentSrc || img.src); doneSrc.delete(img); } // ボタンを押すまで待つ
         } catch (e) {
-          failedAt.set(img, Date.now());
-          setBadge(img, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(img, null); failedAt.delete(img); enqueue(img, true); });
+          // ボタンを押す前（保存の表示だけ）の失敗は黙って待つ。押したときにもう一度試す
+          if (!pageActive() && !forced.has(img) && !S.debug) { waiting.add(img); waitSrc.set(img, img.currentSrc || img.src); }
+          else {
+            failedAt.set(img, Date.now());
+            setBadge(img, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(img, null); failedAt.delete(img); activate(); enqueue(img, true); });
+          }
         } finally {
           running--;
           updateButton();
@@ -5143,7 +5256,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   /* ---------------- 画像の監視 ---------------- */
   const io = new IntersectionObserver((ents) => {
     if (!isOn()) return;
-    for (const e of ents) if (e.isIntersecting && eligible(e.target)) enqueue(e.target, pageForce && !forceDone.has(e.target));
+    for (const e of ents) {
+      if (!e.isIntersecting || !eligible(e.target)) continue;
+      // 翻訳中でないとき（保存した訳を出すだけ）は、画面の近くの画像だけ読む。先の画像まで読み込むとサイトの表示が遅くなるため
+      if (!pageActive() && e.boundingClientRect.top > innerHeight * 1.5) continue;
+      enqueue(e.target, pageForce && !forceDone.has(e.target));
+    }
   }, { rootMargin: '0px 0px 2000px 0px' });
 
   const watched = new WeakSet();
@@ -5185,20 +5303,28 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   }
 
   function translateVisibleNow() {
-    const vh = innerHeight;
+    const vh = innerHeight, reach = pageActive() ? 2 : 1.5;
     document.querySelectorAll('img').forEach((img) => {
       const r = img.getBoundingClientRect();
-      if (r.bottom > 0 && r.top < vh * 2 && eligible(img)) enqueue(img);
+      if (r.bottom > 0 && r.top < vh * reach && eligible(img)) enqueue(img);
     });
   }
+  // 翻訳中でないときは、スクロールで近づいた画像の保存した訳を、その都度出す
+  let nearTimer = 0;
+  addEventListener('scroll', () => {
+    if (!isOn() || pageActive()) return;
+    clearTimeout(nearTimer);
+    nearTimer = setTimeout(translateVisibleNow, 250);
+  }, { passive: true });
 
   /* ---------------- ボタン・設定画面 ---------------- */
   const isOn = () => !!GM_getValue(wtKey(), false); // WTモードのサイト
   // 翻訳（API）は、そのページでWTボタンを押してから。保存してある訳は押さなくても表示する
   let activePage = '';
-  const pid = () => location.host + location.pathname;
+  const pid = () => location.host + location.pathname + location.search; // NAVERは ?no= で話が変わる
   const pageActive = () => activePage === pid();
   const waiting = new Set(); // 保存がなくて、ボタン待ちの画像
+  const waitSrc = new WeakMap(); // ボタン待ちになったときの画像のURL（同じなら、スクロールのたびに調べ直さない）
   // 一時停止：再開（同じページでもう一度押す）まで待つ。別の話に移ったら待つのをやめる
   async function waitResume(myPid) {
     while (!pageActive()) {
@@ -5207,10 +5333,13 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     }
   }
   let origPage = ''; // 原文に戻したページ
+  let syncPid = '';
   const showOrig = (v) => { origPage = v ? pid() : ''; document.documentElement.classList.toggle('ezc-off', !!v); };
+  // 訳し直し・再試行など、手で頼んだ翻訳も「翻訳中」として扱う（ボタンが回り、押せば一時停止できる）
+  function activate() { showOrig(false); activePage = pid(); }
   function togglePage() {
     // 翻訳中に押したら：止めて原文に戻す（小説の「原」と同じ）
-    if (pageActive()) { activePage = ''; showOrig(true); toast('原文に戻した'); updateButton(); return; }
+    if (pageActive()) { activePage = ''; pageForce = false; showOrig(true); toast('原文に戻した'); updateButton(); return; }
     if (!keyOf()) { openPanel(); toast('先にGeminiのAPIキーを入れてね'); return; }
     showOrig(false);
     activePage = pid();
@@ -5239,6 +5368,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     font-weight:800;font-size:17px;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,.28);
     touch-action:none;user-select:none;-webkit-user-select:none;opacity:.9}
   .fab.on{background:#2b2d42;color:#fff}
+  .fab.busy::before{content:"";position:absolute;inset:-5px;border-radius:50%;border:3px solid rgba(84,101,232,.18);border-top-color:#5465e8;animation:ezc-spin .8s linear infinite}
+  @keyframes ezc-spin{to{transform:rotate(360deg)}}
   .fab .n{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:#ef476f;color:#fff;font-size:11px;
     line-height:18px;text-align:center;padding:0 4px}
   .fab .n[hidden]{display:none}
@@ -5256,8 +5387,9 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   .btns{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
   button{padding:10px 14px;border-radius:8px;border:1px solid #2b2d42;background:#fff;color:#2b2d42;font-weight:700;font-size:14px}
   button.pri{background:#2b2d42;color:#fff}
-  .toast{position:fixed;left:50%;bottom:150px;transform:translateX(-50%);background:rgba(24,24,32,.92);color:#fff;padding:10px 14px;border-radius:10px;
-    font-size:13px;max-width:86vw}
+  .toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top,0px) + 12px);transform:translateX(-50%);background:rgba(24,28,40,.78);color:#fff;
+    padding:7px 13px;border-radius:999px;font-size:12px;font-weight:500;max-width:80vw;width:max-content;box-shadow:0 4px 14px rgba(0,0,0,.18);
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);pointer-events:none}
   .toast[hidden]{display:none}
   @media (prefers-color-scheme: dark){
     .sheet{background:#1e1f26;color:#ececf1}
@@ -5346,7 +5478,10 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     show: (v) => { host.style.display = v ? '' : 'none'; },
     setOn: (v) => setOn(v),
     // 別の話に移ったら、原文表示を解除（保存してある訳はまた最初から出す）
-    sync: () => { if (origPage && origPage !== pid()) { showOrig(false); if (isOn()) translateVisibleNow(); } },
+    sync: () => {
+      if (syncPid !== pid()) { syncPid = pid(); pageForce = false; } // 別の話に移ったら「全部訳し直す」は終わり
+      if (origPage && origPage !== pid()) { showOrig(false); if (isOn()) translateVisibleNow(); }
+    },
     // 設定画面（小説と同じ画面のWTタブ）との受け渡し：元の設定欄に値を入れて、元の処理をそのまま使う
     load: () => {
       fillPanel();
@@ -5365,24 +5500,30 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     preview: (v) => { $('ts').value = v; $('ts').oninput(); },
     importText: (t) => importData(t),
     // 小説のボタンの「訳」の位置に重ねる
-    placeAt: (r) => { fab.style.right = Math.max(0, innerWidth - r.right) + 'px'; fab.style.bottom = Math.max(0, innerHeight - r.bottom) + 'px'; },
+    // ⚙と同じ基準（画面の左上から）で置く。右下基準だと、スマホのアドレスバーの出し入れで画面の高さが変わったときにずれるため
+    placeAt: (r) => { fab.style.right = 'auto'; fab.style.bottom = 'auto'; fab.style.left = Math.round(r.left) + 'px'; fab.style.top = Math.round(r.top) + 'px'; },
   };
 
   const $ = (id) => root.getElementById(id);
   const fab = $('fab');
 
   let toastTimer;
+  // いつもの動き（翻訳開始・原文に戻す・保存から表示など）はボタンの見た目で分かるので出さない。確認モードのときだけ出す
+  const QUIET = /^(このページを翻訳する|原文に戻した|保存した$|翻訳メモを更新(中…|した)|保存から\d+枚表示)/;
   function toast(msg) {
+    if (QUIET.test(String(msg)) && !S.debug) return;
+    if (ui.isOpen()) return ui.toast(String(msg), 3000); // 設定画面を開いている間はWTの表示が隠れるので、設定画面側に出す
     const t = $('toast');
     t.textContent = msg; t.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (t.hidden = true), 3500);
+    toastTimer = setTimeout(() => (t.hidden = true), 2600);
   }
 
   function updateButton() {
     fab.classList.toggle('on', pageActive());
     const n = queue.length + running + scanWait.length + (scanBusy ? 1 : 0);
-    $('n').hidden = n === 0;
+    fab.classList.toggle('busy', n > 0 && pageActive()); // 翻訳中はボタンのまわりがくるくる回る
+    $('n').hidden = n === 0 || !S.debug; // 残りの枚数は確認モードのときだけ
     $('n').textContent = n;
   }
   function applyPos() {
@@ -5464,11 +5605,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     const imgs = [...document.images].filter((img) => eligible(img));
     if (!confirm(`この話の画像を全部訳し直す？（今読み込まれている${imgs.length}枚＋この後読み込まれる分。API代がかかる）`)) return;
     $('sheet').hidden = true;
-    pageForce = true;
+    activate(); pageForce = true;
     imgs.forEach((img) => { if (!forceDone.has(img)) enqueue(img, true); });
   };
   $('redo').onclick = () => {
     $('sheet').hidden = true;
+    activate();
     const vh = innerHeight;
     document.querySelectorAll('img').forEach((img) => {
       const r = img.getBoundingClientRect();
