@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         韓国小説 丸ごと翻訳
+// @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.3
+// @version      10.5.5
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2768,6 +2769,7 @@ ${body}</main></body></html>`;
       moved = true;
       dock.classList.add('dragging');
       drag.pos = place(drag.l + dx, drag.t + dy);
+      if (wtPageNow && wtApi) wtApi.placeAt(fab.getBoundingClientRect()); // WTボタンも一緒に動かす
       e.preventDefault();
     }, { capture: true, passive: false });
     const endDrag = () => {
@@ -2865,6 +2867,15 @@ ${body}</main></body></html>`;
       showFab: v => { if (panel.hidden) { fab.hidden = !v; gearBtn.hidden = !v; copyBtn.hidden = !v || !hasCopy; saveBtn.hidden = !v || !hasCopy || !canSave(); } },
       wtLayout: v => { dock.classList.toggle('wt', !!v); if (v) { copyBtn.hidden = true; saveBtn.hidden = true; } },
       mainRect: () => fab.getBoundingClientRect(),
+      // WTボタンをドラッグしたときは、⚙ごと（ボタン一式）動かす
+      dockDrag: (() => {
+        let st = null;
+        return {
+          start: () => { const r = dock.getBoundingClientRect(); st = { l: r.left, t: r.top, pos: null }; },
+          move: (dx, dy) => { if (!st) return; st.pos = place(st.l + dx, st.t + dy); if (wtApi) wtApi.placeAt(fab.getBoundingClientRect()); },
+          end: () => { if (st && st.pos) GM_setValue(posKey, st.pos); st = null; },
+        };
+      })(),
       canCopy: v => { hasCopy = v; copyBtn.hidden = !v || fab.hidden; saveBtn.hidden = !v || fab.hidden || !canSave(); },
       openSettings: tab => openSettings(tab),
       isOpen: () => !panel.hidden,
@@ -5409,22 +5420,19 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   fab.addEventListener('pointerdown', (e) => {
     fab.setPointerCapture(e.pointerId);
     pd = { x: e.clientX, y: e.clientY, r: S.pos.right, b: S.pos.bottom, moved: false, long: false };
+    ui.dockDrag.start();
     lpTimer = setTimeout(() => { if (pd && !pd.moved) { pd.long = true; openPanel(); } }, 550);
   });
   fab.addEventListener('pointermove', (e) => {
     if (!pd) return;
     const dx = e.clientX - pd.x, dy = e.clientY - pd.y;
     if (!pd.moved && Math.hypot(dx, dy) > 10) { pd.moved = true; clearTimeout(lpTimer); }
-    if (pd.moved) {
-      S.pos.right = Math.min(innerWidth - 52, Math.max(4, pd.r - dx));
-      S.pos.bottom = Math.min(innerHeight - 52, Math.max(4, pd.b - dy));
-      applyPos();
-    }
+    if (pd.moved) ui.dockDrag.move(dx, dy); // ⚙と一緒に動く（位置は小説のボタンと共通）
   });
   fab.addEventListener('pointerup', () => {
     clearTimeout(lpTimer);
     if (!pd) return;
-    if (pd.moved) saveS();
+    if (pd.moved) ui.dockDrag.end();
     else if (!pd.long) togglePage();
     pd = null;
   });
