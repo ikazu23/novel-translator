@@ -418,8 +418,8 @@ const KZ_SET = GM_setValue;
   async function directStream(url, headers, body, progress) {
     let r, timedOut = false, timer = 0;
     const ac = typeof AbortController === 'function' ? new AbortController() : null;
-    // 何も届かないまま2分半たったら止める（電波の切り替えなどで固まらないように）
-    const arm = () => { clearTimeout(timer); if (ac) timer = setTimeout(() => { timedOut = true; ac.abort(); }, 150000); };
+    // 何も届かないまま4分たったら止める（電波の切り替えなどで固まらないように）
+    const arm = () => { clearTimeout(timer); if (ac) timer = setTimeout(() => { timedOut = true; ac.abort(); }, 240000); };
     arm();
     try {
       r = await fetch(url, {
@@ -2689,7 +2689,7 @@ ${body}</main></body></html>`;
       f('sheetModel').value = c.sheetModel;
       f('sheetModel').placeholder = SHEET_MODELS[c.provider] || '翻訳と同じモデル';
       fillModels();
-      setMode(GM_getValue(wtKey(), false) ? 'wt' : 'novel'); // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
+      try { setMode(GM_getValue(wtKey(), false) ? 'wt' : 'novel'); } catch { setMode('novel'); } // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
     }
 
     // モデル一覧：Geminiはキーがあれば実際に使えるものを取得、なければ既定の候補
@@ -5061,7 +5061,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       const runForced = runs.some((p) => forced.has(p)), runPid = pid();
       const readChunk = async (c) => {
         // 途中で止めたら、残りの区切りは一時停止。再開したら続きから送る（読み終わった区切りはそのまま使う）
-        if (!pageActive()) await waitResume(runPid);
+        if (!pageActive() && !(runForced && !forceHold)) await waitResume(runPid);
         return mergeRaw(normalizeRaw(await callGemini([await chunkToB64(st, c)], onWait), c), W);
       };
       const defs = plan.map(() => { let res, rej; const p = new Promise((a, b) => { res = a; rej = b; }); p.catch(() => {}); return { p, res, rej }; });
@@ -5186,7 +5186,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
         let { img, r } = scanWait.shift();
         const src = img.currentSrc || img.src;
         // 止めたら順番待ちも一時停止。再開したらそのまま送る。別の話に移ったら待つのをやめる
-        if (!pageActive()) {
+        if (!pageActive() && !forceRun(img)) {
           try { await waitResume(pid()); } catch (e) { waiting.add(img); setBadge(img, null); continue; }
         }
         if (!img.isConnected || (doneSrc.get(img) === src && !forced.has(img))) continue; // 前のまとまりで訳し済み
@@ -5321,7 +5321,9 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   const isOn = () => !!GM_getValue(wtKey(), false); // WTモードのサイト
   // 翻訳（API）は、そのページでWTボタンを押してから。保存してある訳は押さなくても表示する
   let activePage = '';
-  const pid = () => location.host + location.pathname + location.search; // NAVERは ?no= で話が変わる
+  // 話の見分け：URLのパス＋話を表す項目だけ（NAVERは ?titleId=…&no=… で話が変わる。読む位置などの項目は無視）
+  const PID_Q = /^(no|titleid|ep|episode|episodeid|episode_id|chapter|chapterid|seq|vol|volume|id|bookid|book_id|productid|product_id)$/i;
+  const pid = () => { const q = [...new URLSearchParams(location.search)].filter(([k]) => PID_Q.test(k)).map(([k, v]) => k + '=' + v).join('&'); return location.host + location.pathname + (q ? '?' + q : ''); };
   const pageActive = () => activePage === pid();
   const waiting = new Set(); // 保存がなくて、ボタン待ちの画像
   const waitSrc = new WeakMap(); // ボタン待ちになったときの画像のURL（同じなら、スクロールのたびに調べ直さない）
@@ -5337,9 +5339,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   const showOrig = (v) => { origPage = v ? pid() : ''; document.documentElement.classList.toggle('ezc-off', !!v); };
   // 訳し直し・再試行など、手で頼んだ翻訳も「翻訳中」として扱う（ボタンが回り、押せば一時停止できる）
   function activate() { showOrig(false); activePage = pid(); }
+  let redoing = false, forceHold = false; // 訳し直し中（ページ全体の翻訳はオンにしない）／止めたら訳し直しも一時停止
+  const forceRun = (img) => forced.has(img) && !forceHold;
   function togglePage() {
     // 翻訳中に押したら：止めて原文に戻す（小説の「原」と同じ）
-    if (pageActive()) { activePage = ''; pageForce = false; showOrig(true); toast('原文に戻した'); updateButton(); return; }
+    if (pageActive() || (redoing && !forceHold)) { activePage = ''; pageForce = false; redoing = false; forceHold = true; showOrig(true); toast('原文に戻した'); updateButton(); return; }
+    forceHold = false;
     if (!keyOf()) { openPanel(); toast('先にGeminiのAPIキーを入れてね'); return; }
     showOrig(false);
     activePage = pid();
@@ -5522,7 +5527,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   function updateButton() {
     fab.classList.toggle('on', pageActive());
     const n = queue.length + running + scanWait.length + (scanBusy ? 1 : 0);
-    fab.classList.toggle('busy', n > 0 && pageActive()); // 翻訳中はボタンのまわりがくるくる回る
+    if (!n) redoing = false;
+    fab.classList.toggle('busy', n > 0 && (pageActive() || (redoing && !forceHold))); // 翻訳中はボタンのまわりがくるくる回る
     $('n').hidden = n === 0 || !S.debug; // 残りの枚数は確認モードのときだけ
     $('n').textContent = n;
   }
@@ -5605,12 +5611,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     const imgs = [...document.images].filter((img) => eligible(img));
     if (!confirm(`この話の画像を全部訳し直す？（今読み込まれている${imgs.length}枚＋この後読み込まれる分。API代がかかる）`)) return;
     $('sheet').hidden = true;
-    activate(); pageForce = true;
+    showOrig(false); forceHold = false; redoing = true; pageForce = true;
     imgs.forEach((img) => { if (!forceDone.has(img)) enqueue(img, true); });
   };
   $('redo').onclick = () => {
     $('sheet').hidden = true;
-    activate();
+    showOrig(false); forceHold = false; redoing = true;
     const vh = innerHeight;
     document.querySelectorAll('img').forEach((img) => {
       const r = img.getBoundingClientRect();
