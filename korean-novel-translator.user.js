@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.46
+// @version      10.5.49
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2682,6 +2682,7 @@ ${body}</main></body></html>`;
           <div class="sec">表示と送り方</div>
           <label>文の中の小さな画像（絵文字・アイコン）の代わりに入れる文字（空欄なら画像のまま） <input name="imgChar" placeholder="例：😄"></label>
           <label class="check"><input type="checkbox" name="illust"> 挿絵の中の文字も訳す（「訳」を押したとき。Geminiのキーを使い、挿絵1枚ごとに料金）</label>
+          <label class="check"><input type="checkbox" name="autoMode"> 開いたページに合わせて小説／WTモードを自動で切り替える</label>
           <label class="check"><input type="checkbox" name="jaFont"> 訳文の漢字を日本の字形で表示（韓国風の漢字に違和感があるとき）</label>
           <label class="check"><input type="checkbox" name="adult"> 成人向け表現のブロックを外す（Geminiのみ）</label>
           <label>ベースURL（OpenAI互換のみ） <input name="baseUrl"></label>
@@ -2797,7 +2798,7 @@ ${body}</main></body></html>`;
       f('adult').checked = !!c.adult;
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
-      f('illust').checked = c.illust !== false;
+      f('illust').checked = c.illust !== false; f('autoMode').checked = c.autoMode !== false;
       f('gistToken').value = c.gistToken || ''; f('autoBackup').checked = c.autoBackup !== false;
       f('autoSheet').checked = !!c.autoSheet;
       f('quickStart').checked = c.quickStart !== false;
@@ -3008,7 +3009,7 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
         if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
@@ -3135,10 +3136,10 @@ ${body}</main></body></html>`;
     const wtPage = !!(wtApi && GM_getValue(wtKey(), false));
     wtPageNow = wtPage;
     if (wtApi) wtApi.sync();
-    if (wtApi) wtApi.show(wtPage && !ui.isOpen()); // 設定画面を開いている間はWTボタンを隠す
-    // 漫画のページ：小説の「訳」の場所にWTボタンを置き、設定ボタンは残す
+    // 漫画のページ：小説の「訳」の場所にWTボタンを置き、設定ボタンは残す（先に⚙を出してから、その横にWTボタンを出す）
     ui.wtLayout(wtPage);
     ui.showFab(wtPage || active || many);
+    if (wtApi) wtApi.show(wtPage && !ui.isOpen()); // 設定画面を開いている間はWTボタンを隠す
     if (wtPage) syncWT();
   };
   check();
@@ -3301,21 +3302,54 @@ ${body}</main></body></html>`;
   }
   // 小説モード ⇄ WTモード（サイトごと）
   // 設定を閉じたときのモード切り替え。ここで何か失敗しても、設定画面は必ず閉じられるようにする
-  function applyMode(tab) {
-    try { applyModeInner(tab); }
+  function applyMode(tab, auto) {
+    try { applyModeInner(tab, auto); }
     catch (e) { try { ui.toast('モードの切り替えでエラー：' + (e && e.message), 8000); } catch { /* 表示もできない */ } }
   }
-  function applyModeInner(tab) {
+  function applyModeInner(tab, auto) {
     const wt = tab === 'wt', was = !!GM_getValue(wtKey(), false);
     if (wt === was) return;
+    if (!auto) amManual = true; // 自分で切り替えたページでは、自動で戻さない
     KZ_SET(wtKey(), wt);
     if (wt) {
       if (window.top !== window.self) { alert('WTモードにしました。ページを開き直してください'); return; }
       if (wtApi) wtApi.setOn(true); else startWT();
     } else if (wtApi) wtApi.setOn(false);
-    ui.toast(wt ? 'このサイトはWTモードにしました（WTボタンを押すと翻訳）' : 'このサイトは小説モードにしました', 3000);
+    ui.toast(auto ? (wt ? 'WTモード' : '小説モード') : wt ? 'このサイトはWTモードにしました（WTボタンを押すと翻訳）' : 'このサイトは小説モードにしました', auto ? 1200 : 3000);
     setTimeout(check, 50);
   }
+  // 開いたページに合わせてモードを自動で切り替える：文が多ければ小説、大きな画像が並んでいればWT
+  function autoModeOn() { try { return GM_getValue('cfg', {}).autoMode !== false; } catch { return true; } }
+  var amPage, amTries, amManual, amLast; if (amPage === undefined) { amPage = ''; amTries = 0; amManual = false; amLast = null; }
+  function pageKind() {
+    const h = location.hostname;
+    if (/(^|\.)comic\.naver\.com$/.test(h)) return 'wt';
+    if (/jjwxc|archiveofourown/.test(h)) return 'novel';
+    let txt = 0, big = 0;
+    const minW = Math.min(300, innerWidth * 0.6);
+    for (const r of deepRoots()) {
+      try { for (const el of collectParas(r)) { if (isUiText(el)) continue; txt += (el.textContent || '').trim().length; if (txt > 3000) break; } } catch { /* 数えられない */ }
+      try { for (const im of r.querySelectorAll('img,canvas')) { const b = im.getBoundingClientRect(); if (b.width >= minW && b.height >= 200) big++; } } catch { /* 数えられない */ }
+    }
+    if (txt >= 2000 || (txt >= 400 && big < 5)) return 'novel';
+    if (big >= 3 && txt < 400) return 'wt';
+    return null;
+  }
+  function autoModeTick() {
+    try {
+      if (window.top !== window.self || !autoModeOn() || ui.isOpen() || document.hidden || busy || liveBusy) return;
+      const k = location.host + location.pathname;
+      if (k !== amPage) { amPage = k; amTries = 0; amManual = false; amLast = null; }
+      if (amManual || amTries >= 25) return;
+      if (/page\.kakao\.com$/.test(location.hostname) && !/\/viewer\//.test(location.pathname)) return; // 作品一覧などでは切り替えない（話を開いたときだけ）
+      amTries++;
+      const kind = pageKind();
+      if (!kind || kind !== amLast) { amLast = kind; return; } // 2回続けて同じ結果になったら決める（読み込み途中で決めない）
+      amTries = 99;
+      if (kind !== (GM_getValue(wtKey(), false) ? 'wt' : 'novel')) applyMode(kind, true);
+    } catch { /* 次のページで */ }
+  }
+  setInterval(autoModeTick, 1200);
   function toggleWT() { applyMode(GM_getValue(wtKey(), false) ? 'novel' : 'wt'); }
   // 小説モードの挿絵：小説の「訳」を押したら挿絵の文字も訳し、「原」で原文に戻す（WTの仕組みを使う）
   function illustOn() { try { return GM_getValue('cfg', {}).illust !== false; } catch { return false; } }
@@ -6287,6 +6321,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
 <div class="toast" id="toast" hidden></div>`;
   document.documentElement.appendChild(host);
   host.style.display = 'none'; // 漫画の画像が見つかるまでは出さない
+  let wtWant = false, wtPlaced = false;
   wtApi = {
     // 漫画のページ：大きな画像が画面の半分以上をうめている。一度そうなったら同じページの間はWTのまま（スクロールでちらつかない）
     hasImages: () => {
@@ -6303,7 +6338,14 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       if (area >= vw * vh * 0.5) { wtSeenPage = id; return true; }
       return false;
     },
-    show: (v) => { host.style.display = v ? '' : 'none'; },
+    // ⚙の横に置き終わるまでは出さない（開いた瞬間に右下の初期位置に一瞬出て、ボタンがばらばらに見えるため）
+    show: (v) => {
+      wtWant = !!v;
+      if (!v) { host.style.display = 'none'; return; }
+      if (!wtPlaced) { try { const r = ui.mainRect(); if (r && r.width) wtApi.placeAt(r); } catch (e) { /* あとで置く */ } }
+      if (wtPlaced) host.style.display = '';
+      else setTimeout(() => { if (wtWant && !wtPlaced) host.style.display = ''; }, 1500); // 置けないとき（小説のボタンがない）は初期位置に出す
+    },
     setOn: () => setOn(),
     illust: (v) => illust(v),
     // 画面に出ている挿絵のうち、まだ訳を表示していない（または訳している最中の）枚数
@@ -6352,6 +6394,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     // 小説のボタンの「訳」の位置に重ねる
     // ⚙と同じ基準（画面の左上から）で置く。右下基準だと、スマホのアドレスバーの出し入れで画面の高さが変わったときにずれるため
     placeAt: (r) => {
+      wtPlaced = true; if (wtWant) host.style.display = '';
       fab.style.right = 'auto'; fab.style.bottom = 'auto'; fab.style.left = Math.round(r.left) + 'px'; fab.style.top = Math.round(r.top) + 'px';
       // 縮めて見ているページでは、小説のボタンと同じ大きさにする
       let k = 1; try { k = ui.uiScale(); } catch (e) { k = 1; }
