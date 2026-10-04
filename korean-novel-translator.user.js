@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.15
+// @version      10.5.46
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -839,6 +839,7 @@ const KZ_SET = GM_setValue;
       c.setAttribute('style', props.map(p => `${p}:${solid(cs.getPropertyValue(p))}`).join(';'));
       for (const at of [...c.attributes]) if (/^on/i.test(at.name) || at.name === 'class' || at.name === 'id') c.removeAttribute(at.name);
       if (c.tagName === 'IMG' && o.src) c.setAttribute('src', o.src);
+      if (c.tagName === 'IMG') { const ib = illustFor(o); if (ib && c.parentNode) { const d = document.createElement('div'); d.setAttribute('style', 'margin:.6em 0 1.2em;text-align:center'); d.innerHTML = ib.html; c.parentNode.insertBefore(d, c.nextSibling); } }
       if (c.tagName === 'A') c.removeAttribute('href');
     });
     return clone;
@@ -917,6 +918,7 @@ ${bodyHtml}
         items.push({ el: e, text: toPlain(e, tr[i] ?? srcs[i]) });
         continue;
       }
+      if (e.tagName === 'IMG') { const ib = illustFor(e); if (ib) items.push({ el: e, text: ib.text, illust: ib }); continue; }
       if (!isBlock(e) || inTranslated(e) || (!/kakao/.test(location.host) && inNonBody(e, root))) continue;
       const hasBlockChild = [...e.children].some(ch => isBlock(ch) && getComputedStyle(ch).display !== 'none');
       if (hasBlockChild) continue;
@@ -957,7 +959,7 @@ ${bodyHtml}
         blanks = emptyRun;
         if (useRects && gaps[li - 1] != null) blanks = Math.max(0, Math.round((gaps[li - 1] - g0) / pitch));
       }
-      res.push({ el: x.el, text: x.text, blanks: Math.min(blanks, 10) });
+      res.push({ el: x.el, text: x.text, blanks: Math.min(blanks, 10), illust: x.illust });
       li++; emptyRun = 0;
     }
     return res;
@@ -1014,6 +1016,7 @@ ${bodyHtml}
     const paras = [];
     lines.forEach((x, k) => {
       for (let b = 0; b < x.blanks; b++) paras.push({ blank: true });
+      if (x.illust) { paras.push({ html: x.illust.html, text: x.text, align: 'center' }); return; } // 挿絵の訳（色もそのまま）
       const cs = styles[k];
       let html = inlineHtml(x.el);
       const wrap = [];
@@ -1045,7 +1048,7 @@ ${bodyHtml}
     if (cached) { const cc = cleanBlock(cached); ui.render(cc); setLast(cc); return ui.status(`保存済みの${provName()}版の訳を表示中`); }
 
     const c = cfg();
-    if (!c.key) { ui.status('APIキーを設定してください'); return ui.settings(true); }
+    if (!c.key) { ui.status('APIキーを設定してください'); return ui.settings(true, 'novel'); }
 
     const chunks = makeChunks(paras.map(p => p.length), c.chunk, c.quickStart);
     const whole = chunks.length > 1 && src.length <= 30000 ? src : '';
@@ -1555,21 +1558,99 @@ ${bodyHtml}
   // 場面（グループ）の区切りに入れる印。本文の「＊＊＊」と見分けやすい形にしてある
   const SCENE_MARK = '◇　◇　◇';
 
+  // 挿絵の訳（小説モードで訳した挿絵）：直前に読んだ文の後ろに入れる
+  const illustAt = anchor => Object.values((liveData && liveData.illust) || {}).filter(x => x && x.anchor === anchor && x.text).sort((a, b) => (a.at || 0) - (b.at || 0));
+  // ページの挿絵の画像に付いている訳（文字と、色付きのHTML）。なければ null
+  function illustFor(img) { try { return window.top === window.self && wtApi ? wtApi.illustFor(img) : null; } catch { return null; } }
+  // 挿絵のすぐ前にある本文の段落（記録にある文）。見つからなければ null
+  let anchorHow = '';
+  function anchorFor(img) {
+    anchorHow = '';
+    try {
+      const all = deepRoots().flatMap(r => collectParas(r));
+      // ① 画面上で挿絵より前にある本文（位置で見る）。縦に続くページなら挿絵の上、横にめくるページなら左のページ
+      const ir = img.getBoundingClientRect(), vw = innerWidth || 1;
+      let best = null, bk = null;
+      for (const el of all) {
+        if (el.ownerDocument !== img.ownerDocument) continue;
+        const r = el.getBoundingClientRect();
+        if (!r.height) continue;
+        const above = r.bottom <= ir.top + 4 && r.right > ir.left && r.left < ir.right && ir.top - r.bottom < innerHeight * 1.5;
+        const left = r.right <= ir.left + 4 && ir.left - r.right < vw * 1.2;
+        if (!above && !left) continue;
+        const k = [Math.floor((r.left - ir.left) / vw), r.bottom]; // 右のページほど・下ほど後ろ
+        if (bk && (k[0] < bk[0] || (k[0] === bk[0] && k[1] <= bk[1]))) continue;
+        const src = serialize(el);
+        if (liveData.map[src] != null) { best = src; bk = k; }
+      }
+      if (best) { anchorHow = '位置'; return best; }
+      // ② 直前に訳が出た文のうち、いちばん後ろの文（順番に読んでいれば、挿絵の直前の文）
+      if (lastSeenSrc && liveData.map[lastSeenSrc] != null) { anchorHow = '直前に読んだ文'; return lastSeenSrc; }
+      // ③ ページの並び順
+      const els = all.filter(el => el.ownerDocument === img.ownerDocument && (el.compareDocumentPosition(img) & 4) && !(el.compareDocumentPosition(img) & 1));
+      for (let i = els.length - 1; i >= 0; i--) {
+        const src = serialize(els[i]);
+        if (liveData.map[src] != null) { anchorHow = '並び順'; return src; }
+      }
+    } catch { /* 探せない */ }
+    return null;
+  }
+  const hamHex = (a, b) => { let n = 0; for (let i = 0; i < Math.min(a.length, b.length); i++) { let x = parseInt(a[i], 16) ^ parseInt(b[i], 16); while (x) { n += x & 1; x >>= 1; } } return n + Math.abs(a.length - b.length) * 4; };
+  function onIllustShown(img, blk, dh) {
+    try {
+      if (!blk || !blk.text || !liveData || liveData.key !== liveKey()) return;
+      const il = liveData.illust || (liveData.illust = {});
+      // 前の版の記録の片付け：画像の番号で見分けていたもの、場所が分からず最後に付けていたもの
+      for (const k of Object.keys(il)) if (k.includes('#') || (!il[k].dh && !il[k].sure)) delete il[k];
+      // 挿絵は画像そのもの（見た目の指紋）で見分ける。訳し直して訳が変わっても同じ挿絵として置き換える
+      let id = dh ? 'd' + dh : 'i' + hash(blk.text);
+      if (dh) {
+        const same = Object.keys(il).filter(k => il[k].dh && hamHex(il[k].dh, dh) <= 8);
+        if (same.length) { id = same[0]; same.slice(1).forEach(k => delete il[k]); }
+        // 同じ訳で記録された前の版の項目（指紋なし）も、この挿絵として引き継ぐ
+        const old = 'i' + hash(blk.text);
+        if (il[old] && !il[old].dh && old !== id) { if (!il[id]) il[id] = il[old]; delete il[old]; }
+      }
+      const cur0 = il[id];
+      // 場所が決まっていて訳も同じなら、何もしない（本文の段落を全部調べる処理は重いので）
+      if (cur0 && cur0.sure && cur0.text === blk.text && cur0.html === blk.html && (!dh || cur0.dh === dh)) return;
+      const anc = anchorFor(img);
+      const cur = il[id];
+      if (cur && dh) cur.dh = dh;
+      if (cur) {
+        // 画面の並びから場所が分かったら、そちらを使う（前は「最後に読んだ文」の後ろだった）
+        const anchor = anc != null ? anc : cur.anchor;
+        if (cur.text === blk.text && cur.html === blk.html && cur.anchor === anchor) return;
+        Object.assign(cur, { text: blk.text, html: blk.html, anchor, sure: anc != null || cur.sure, how: anc != null ? anchorHow : cur.how });
+      } else {
+        const ents = liveEntries();
+        il[id] = { anchor: anc != null ? anc : ents.length ? ents[ents.length - 1] : '', sure: anc != null, how: anc != null ? anchorHow : '最後（不明）', text: blk.text, html: blk.html, at: Date.now(), dh: dh || '' };
+      }
+      liveSave(); snapLater();
+      if (liveEntries().length) setLast(liveText());
+    } catch { /* 記録できなくても表示は続ける */ }
+  }
+
   function liveText() {
     let out = '', lastS = null;
+    // 挿絵の訳は、場面の区切りと同じ印ではさむ
+    const addIllust = anchor => { for (const x of illustAt(anchor)) out += (out ? `\n\n${SCENE_MARK}\n\n` : '') + x.text + `\n\n${SCENE_MARK}\n`; };
+    addIllust('');
     for (const { src, scene, lay } of liveSeq()) {
       if (liveData.map[src] == null) continue;
       if (out) out += lastS != null && scene !== lastS ? `\n\n${SCENE_MARK}\n\n` : '\n' + '\n'.repeat(lay?.blanks || 0);
       out += stripTags(String(liveData.map[src]).replace(/<t\d+\/>/g, '■'));
       lastS = scene;
+      addIllust(src);
     }
-    return out;
+    return out.replace(/\n+$/, '');
   }
 
   // ページは書き換えず、保存用に装飾つきの訳文HTMLと配置だけ記録する
   function applyLive(el, src) {
     const t = liveData.map[src];
     if (t == null) return;
+    noteSeen(el, src);
     const cs = el.isConnected ? getComputedStyle(el) : null;
     liveData.meta[src] = Object.assign(liveData.meta[src] || {}, {
       html: el.isConnected ? tagsToHtml(el, t) : escHtml(stripTags(t)),
@@ -1665,14 +1746,26 @@ ${bodyHtml}
       items.push({ el, src });
       if (liveData.map[src] == null) liveQueue.set(src, el);
     }
+    if (items.length) { lastSeenSrc = items[items.length - 1].src; lastSeenEl = items[items.length - 1].el; } // 最後に読んでいた画面の最後の文（挿絵の場所を決める手がかり）
     return items;
+  }
+  var lastSeenSrc; if (lastSeenSrc === undefined) lastSeenSrc = '';
+  var lastSeenEl; if (lastSeenEl === undefined) lastSeenEl = null;
+  // 画面に訳が出た文のうち、読む順でいちばん後ろのもの（挿絵の場所を決める手がかり）
+  function noteSeen(el, src) {
+    try {
+      if (!el || !el.isConnected || !isOnScreen(el)) return;
+      const r = el.getBoundingClientRect();
+      const o = lastSeenEl && lastSeenEl.isConnected && isOnScreen(lastSeenEl) ? lastSeenEl.getBoundingClientRect() : null;
+      if (!o || r.left > o.right - 4 || r.bottom > o.bottom) { lastSeenEl = el; lastSeenSrc = src; }
+    } catch { /* 位置が取れない */ }
   }
 
 
   let liveErr = null;
   async function liveTranslate(note, limit) {
     const c = cfg();
-    if (!c.key) { ui.open(); ui.status('APIキーを設定してください'); ui.settings(true); return false; }
+    if (!c.key) { ui.open(); ui.status('APIキーを設定してください'); ui.settings(true, 'novel'); return false; }
     liveBusy = true;
     // 1回に送る量は設定の「1回に送る文字数」まで（段落数の上限はなし）
     const batch = [];
@@ -1867,7 +1960,10 @@ ${bodyHtml}
     const items = scanShown(force);
     // 新しい韓国語がなく、訳を表示中の文があるなら、押すと原文に戻す
     if (!items.length) {
+      // 本文は訳してあって、まだ訳していない挿絵がある画面：挿絵を訳す（本文を原文に戻さない）
+      if (illustPendingNow() && illustTap()) return;
       if (shownTranslated().length) { restoreText(); ui.fabLabel('訳'); return ui.toast('原文に戻しました', 1500); }
+      if (illustTap()) return;
       return ui.toast('今の画面に訳せる文が見つかりません', 2500);
     }
     // 場面の記録：韓国語の行に加えて、韓国語のない行（記号や「……!」など）もそのまま入れる
@@ -1960,6 +2056,15 @@ ${bodyHtml}
     const blankH = base.lh && base.lh !== 'normal' ? base.lh : '1.9em';
     const paras = [];
     let lastG = null, body = '';
+    const addIllust = anchor => {
+      for (const x of illustAt(anchor)) {
+        const mark = { html: SCENE_MARK, text: SCENE_MARK, align: 'center', color: 'rgb(150, 150, 150)' };
+        const markHtml = `<p style="margin:0;height:${blankH}"></p>\n<p style="margin:0;text-align:center;color:#999;letter-spacing:.2em">${SCENE_MARK}</p>\n<p style="margin:0;height:${blankH}"></p>\n`;
+        paras.push({ blank: true }, mark, { blank: true }, { html: x.html, text: x.text, align: 'center' }, { blank: true }, mark, { blank: true });
+        body += markHtml + `<div style="margin:1em 0;text-align:center">${x.html}</div>\n` + markHtml;
+      }
+    };
+    addIllust('');
     for (const { src: k, scene, lay } of seq) {
       const meta = liveData.meta[k] || {};
       if (lastG != null && scene !== lastG) {
@@ -1989,6 +2094,7 @@ ${bodyHtml}
       para.html = html;
       paras.push(para);
       lastG = scene;
+      addIllust(k);
     }
     const title = pageTitle().replace(/\s+/g, ' ').trim() || 'translation';
     const data = { v: 1, title, source: location.href, baseSize, paras };
@@ -2169,7 +2275,7 @@ ${body}</main></body></html>`;
     }
 
     const c = cfg();
-    if (!c.key) { ui.open(); ui.status('APIキーを設定してください'); return ui.settings(true); }
+    if (!c.key) { ui.open(); ui.status('APIキーを設定してください'); return ui.settings(true, 'novel'); }
 
     // 段落ごとの記録にある段落は、そのまま使う（料金なし）
     const pm = force ? {} : getParaMap();
@@ -2289,12 +2395,12 @@ ${body}</main></body></html>`;
     if (!file) return null;
     return file.truncated ? await gh('GET', file.raw_url, token) : file.content;
   }
-  let backupRunning = false;
+  let backupRunning = false, backupAgain = false;
   async function backupNow(manual) {
     const c = GM_getValue('cfg', {});
     const token = (c.gistToken || '').trim();
     if (!token) { if (manual) ui.toast('設定でGitHubのトークンを入れてください', 4000); return; }
-    if (backupRunning) { if (manual) ui.toast('クラウドに保存中です', 2000); return; }
+    if (backupRunning) { backupAgain = true; if (manual) ui.toast('クラウドに保存中です', 2000); return; }
     backupRunning = true;
     backupDirty = false; // 送っている間に増えた訳は、次の回で送る
     try {
@@ -2315,7 +2421,11 @@ ${body}</main></body></html>`;
     } catch (e) {
       backupDirty = true;
       if (manual) ui.toast('クラウド保存に失敗：' + e.message, 5000);
-    } finally { backupRunning = false; }
+    } finally {
+      backupRunning = false;
+      // 保存中に増えた訳は、少し待ってからもう一度送る
+      if (backupAgain) { backupAgain = false; if (backupDirty) scheduleBackup(); }
+    }
   }
   function scheduleBackup() {
     clearTimeout(backupTimer);
@@ -2424,6 +2534,11 @@ ${body}</main></body></html>`;
       .fab.main.on { background: linear-gradient(145deg, var(--on), var(--on2)); box-shadow: 0 4px 14px rgba(11,138,115,.38), 0 1px 3px rgba(0,0,0,.18); }
       /* 押した瞬間：沈み込む */
       .fab.pressed, .fab:active { transform: scale(.86); filter: brightness(.9); }
+      /* 押した瞬間：光の輪が広がる／受け付けられないとき：小さく揺れる */
+      .fab.tap::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 3px solid rgba(84,101,232,.55); animation: kz-tap .45s ease-out forwards; pointer-events: none; }
+      @keyframes kz-tap { from { transform: scale(.9); opacity: 1; } to { transform: scale(1.45); opacity: 0; } }
+      .fab.nope { animation: kz-nope .3s; }
+      @keyframes kz-nope { 0%,100% { translate: 0 } 25% { translate: -4px 0 } 75% { translate: 4px 0 } }
       /* 押したあと：波紋が広がる */
       .fab.flash { animation: kz-ring .5s ease-out; }
       .fab.sub.flash { animation: kz-ring-sub .5s ease-out; }
@@ -2517,7 +2632,7 @@ ${body}</main></body></html>`;
         top: calc(env(safe-area-inset-top, 0px) + 14px); z-index: 2147483647; padding: 10px 16px;
         border-radius: 14px; background: rgba(24,28,40,.9); color: #fff; font: 500 13.5px/1.55 system-ui, sans-serif;
         box-shadow: 0 8px 24px rgba(0,0,0,.22); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-        animation: kz-pop .22s ease-out; }
+        animation: kz-pop .22s ease-out; pointer-events: none; }
       @keyframes kz-pop { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
       iframe.panel { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; margin: 0;
         z-index: 2147483647; background: transparent; display: block; }
@@ -2566,6 +2681,7 @@ ${body}</main></body></html>`;
           <label>予備モデル（混雑時に順番に切り替え。カンマ区切り、空欄で既定） <input name="fallback"></label>
           <div class="sec">表示と送り方</div>
           <label>文の中の小さな画像（絵文字・アイコン）の代わりに入れる文字（空欄なら画像のまま） <input name="imgChar" placeholder="例：😄"></label>
+          <label class="check"><input type="checkbox" name="illust"> 挿絵の中の文字も訳す（「訳」を押したとき。Geminiのキーを使い、挿絵1枚ごとに料金）</label>
           <label class="check"><input type="checkbox" name="jaFont"> 訳文の漢字を日本の字形で表示（韓国風の漢字に違和感があるとき）</label>
           <label class="check"><input type="checkbox" name="adult"> 成人向け表現のブロックを外す（Geminiのみ）</label>
           <label>ベースURL（OpenAI互換のみ） <input name="baseUrl"></label>
@@ -2667,8 +2783,8 @@ ${body}</main></body></html>`;
       draft.sheetModels[curProv] = f('sheetModel').value.trim();
     };
     let sheetLoaded = '';
-    function settings(show) {
-      if (!show && !form.hidden && typeof applyMode === 'function') applyMode(curTab); // 閉じたときのタブでモードを決める
+    function settings(show, tab) {
+      if (!show && !form.hidden && typeof applyMode === 'function') { try { applyMode(curTab); } catch { /* 切り替えに失敗しても画面は戻す */ } } // 閉じたときのタブでモードを決める
       form.hidden = !show; text.hidden = show;
       if (!show) return;
       const c = cfg();
@@ -2681,6 +2797,7 @@ ${body}</main></body></html>`;
       f('adult').checked = !!c.adult;
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
+      f('illust').checked = c.illust !== false;
       f('gistToken').value = c.gistToken || ''; f('autoBackup').checked = c.autoBackup !== false;
       f('autoSheet').checked = !!c.autoSheet;
       f('quickStart').checked = c.quickStart !== false;
@@ -2689,7 +2806,7 @@ ${body}</main></body></html>`;
       f('sheetModel').value = c.sheetModel;
       f('sheetModel').placeholder = SHEET_MODELS[c.provider] || '翻訳と同じモデル';
       fillModels();
-      try { setMode(GM_getValue(wtKey(), false) ? 'wt' : 'novel'); } catch { setMode('novel'); } // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
+      try { setMode(typeof tab === 'string' ? tab : GM_getValue(wtKey(), false) ? 'wt' : 'novel'); } catch { setMode('novel'); } // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
     }
 
     // モデル一覧：Geminiはキーがあれば実際に使えるものを取得、なければ既定の候補
@@ -2726,9 +2843,10 @@ ${body}</main></body></html>`;
 
     // タップで翻訳。設定は ⚙ ボタン（または「訳」の長押し）
     const openSettings = tab => {
-      panel.hidden = false; fab.hidden = true; copyBtn.hidden = true; saveBtn.hidden = true; gearBtn.hidden = true; settings(true);
+      try { if (pd && pd.documentElement) pd.documentElement.style.zoom = uiScale > 1.05 ? String(uiScale) : ''; } catch { /* そのまま */ }
+      panel.hidden = false; fab.hidden = true; copyBtn.hidden = true; saveBtn.hidden = true; gearBtn.hidden = true;
       if (wtApi) wtApi.show(false);
-      setMode(typeof tab === 'string' ? tab : (GM_getValue(wtKey(), false) ? 'wt' : 'novel'));
+      settings(true, tab);
     };
     // ---- 設定画面：小説 ⇄ WT（まんが）の切り替え ----
     const wf = n => form.querySelector(`[name=wt_${n}]`);
@@ -2789,7 +2907,16 @@ ${body}</main></body></html>`;
       if (file && wtReady()) wtApi.importText(await file.text());
       inp.value = '';
     });
-    fab.addEventListener('click', () => (cfg().mode === 'inplace' ? translateInPlace(false) : translate(false)));
+    fab.addEventListener('click', () => {
+      // 押したことがすぐ分かるように：軽く振動して、光の輪を出す。訳している最中なら小さく揺れる
+      try { navigator.vibrate && navigator.vibrate(12); } catch { /* 振動なし */ }
+      const busyNow = busy || liveBusy;
+      fab.classList.remove('tap', 'nope'); void fab.offsetWidth;
+      fab.classList.add(busyNow ? 'nope' : 'tap');
+      setTimeout(() => fab.classList.remove('tap', 'nope'), 500);
+      if (cfg().mode === 'inplace') translateInPlace(false); else translate(false);
+      setTimeout(syncLabel, 900);
+    });
     fab.addEventListener('contextmenu', e => { e.preventDefault(); if (!moved) openSettings(); });
     gearBtn.addEventListener('click', openSettings);
 
@@ -2802,6 +2929,28 @@ ${body}</main></body></html>`;
       Object.assign(dock.style, { left: l + 'px', top: t + 'px', right: 'auto', bottom: 'auto' });
       return { l, t };
     }
+    // パソコン用の広いページをスマホで縮めて見ているとき（晋江など）は、ボタン・お知らせ・設定画面を同じ割合で大きくする
+    let uiScale = 1;
+    function applyScale() {
+      try {
+        const vv = window.visualViewport;
+        const sc = Math.min(3, Math.max(1, vv && vv.scale ? 1 / vv.scale : 1));
+        if (Math.abs(sc - uiScale) < 0.05) return;
+        uiScale = sc;
+        const big = sc > 1.05;
+        Object.assign(dock.style, { scale: big ? String(sc) : '', transformOrigin: '0 0' });
+        Object.assign(toastEl.style, { scale: big ? String(sc) : '', transformOrigin: 'top center' });
+        try { if (pd && pd.documentElement) pd.documentElement.style.zoom = big ? String(sc) : ''; } catch { /* 設定画面なし */ }
+        // 右下に置いていたボタンは、大きくした分だけ内側に寄せる
+        requestAnimationFrame(() => {
+          const r = dock.getBoundingClientRect();
+          if (!dock.style.left) place(innerWidth - r.width - 16 * sc, innerHeight - r.height - 18 * sc);
+          else place(parseFloat(dock.style.left), parseFloat(dock.style.top));
+        });
+      } catch { /* そのまま */ }
+    }
+    if (window.visualViewport) visualViewport.addEventListener('resize', () => { clearTimeout(applyScale.t); applyScale.t = setTimeout(applyScale, 200); });
+    setTimeout(applyScale, 300);
     let drag = null, moved = false;
     dock.addEventListener('pointerdown', e => {
       const r = dock.getBoundingClientRect();
@@ -2832,7 +2981,7 @@ ${body}</main></body></html>`;
     addEventListener('resize', () => { if (dock.style.left) place(parseFloat(dock.style.left), parseFloat(dock.style.top)); });
     const onClick = e => {
       const a = e.target.closest('[data-a]')?.dataset.a;
-      if (a === 'close') { if (!form.hidden) applyMode(curTab); panel.hidden = true; fab.hidden = false; }
+      if (a === 'close') { panel.hidden = true; fab.hidden = false; if (!form.hidden) applyMode(curTab); }
       if (a === 'redo') {
         settings(false);
         if (cfg().mode === 'inplace') { panel.hidden = true; fab.hidden = false; translateInPlace(true); }
@@ -2859,9 +3008,10 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
+        if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
         // 作品メモは手で直したときだけ保存（開いている間に裏で更新された新しいメモを古い内容で上書きしない）
         if (f('sheet').value !== sheetLoaded) {
           if (f('sheet').value.trim()) GM_setValue(sheetKey(), f('sheet').value.trim());
@@ -2872,7 +3022,7 @@ ${body}</main></body></html>`;
     };
     root.addEventListener('click', onClick);
     if (pd !== root) pd.addEventListener('click', onClick);
-    const onKey = e => { if (e.key === 'Escape' && !panel.hidden) { if (!form.hidden) applyMode(curTab); panel.hidden = true; fab.hidden = false; } };
+    const onKey = e => { if (e.key === 'Escape' && !panel.hidden) { panel.hidden = true; fab.hidden = false; if (!form.hidden) applyMode(curTab); } };
     document.addEventListener('keydown', onKey);
     if (pd !== root) pd.addEventListener('keydown', onKey);
 
@@ -2892,7 +3042,6 @@ ${body}</main></body></html>`;
     };
     press(root); if (pd !== root) press(pd);
     const toastEl = $('.toast');
-    toastEl.addEventListener('click', () => { clearTimeout(toastTimer); toastEl.hidden = true; });
     const cardEl = $('.card'), cardBody = $('.card-body');
     $('.card-x').addEventListener('click', () => { cardEl.hidden = true; });
     let hasCopy = false;
@@ -2909,13 +3058,18 @@ ${body}</main></body></html>`;
         clearTimeout(toastTimer);
         if (toastEl.hidden) { toastEl.style.animation = 'none'; void toastEl.offsetWidth; toastEl.style.animation = ''; }
         toastEl.textContent = m; toastEl.hidden = false;
-        // エラーなどは少し長めに出して消す（タップでも消える）
+        // エラーなどは少し長めに出して消す（お知らせは押しても下のボタンに届くように、タップは受けない）
         if (!hideMs && /エラー|失敗|見つかりません|読み込めません|できません/.test(m)) hideMs = 8000;
         if (hideMs) toastTimer = setTimeout(() => { toastEl.hidden = true; }, hideMs);
       },
       fabText: () => fab.textContent,
-      fabLabel: t => { fab.textContent = t; fab.classList.toggle('on', t === '原'); fab.title = t === '原' ? '原文に戻す' : 'この話を翻訳'; },
-      setBusy: v => fab.classList.toggle('busy', !!v),
+      uiScale: () => uiScale,
+      // 表示だけ変える（挿絵の状態などは変えない）：今の画面で押すと何が起きるか
+      fabShow: t => { if (fab.textContent === t) return; fab.textContent = t; fab.classList.toggle('on', t === '原'); fab.title = t === '原' ? '原文に戻す' : 'この画面を翻訳'; },
+      fabLabel: t => { fab.textContent = t; fab.classList.toggle('on', t === '原'); fab.title = t === '原' ? '原文に戻す' : 'この話を翻訳'; try { onNovelState(t === '原'); } catch { /* 挿絵なし */ } },
+      // 小説の翻訳中、または挿絵の翻訳中は「訳/原」ボタンのまわりが回る
+      setBusy: v => { fab.dataset.nb = v ? '1' : ''; fab.classList.toggle('busy', !!(v || fab.dataset.ib)); },
+      setIllustBusy: v => { fab.dataset.ib = v ? '1' : ''; fab.classList.toggle('busy', !!(v || fab.dataset.nb)); },
       showFab: v => { if (panel.hidden) { fab.hidden = !v; gearBtn.hidden = !v; copyBtn.hidden = !v || !hasCopy; saveBtn.hidden = !v || !hasCopy || !canSave(); } },
       wtLayout: v => { dock.classList.toggle('wt', !!v); if (v) { copyBtn.hidden = true; saveBtn.hidden = true; } },
       mainRect: () => fab.getBoundingClientRect(),
@@ -2957,7 +3111,7 @@ ${body}</main></body></html>`;
   const check = () => {
     if ((inPlaceOn || textApplied.size) && !busy && !snapDone.has(pageId() + prov())) { snapDone.add(pageId() + prov()); snapLater(); }
     if (liveData && liveData.key !== liveKey()) clearOverlays(); // 別の話に移ったら重ね表示を外す
-    if (!overlays.length && !inPlaceOn && !shownTranslated().length && ui.fabText() === '原') ui.fabLabel('訳');
+    if (!overlays.length && !inPlaceOn && !shownTranslated().length && ui.fabText() === '原' && !illustByTap) ui.fabLabel('訳');
     if (lastText && lastHref !== pageId()) setLast('');
     if (inPlaceOn && !liveOn && !(keep && keep.id === pageId()) && ![...applied.keys()].some(e => e.isConnected)) { applied.clear(); inPlaceOn = false; ui.fabLabel('訳'); }
     // Ridi・カカオページ以外の kakao.com では、iframeの中（ビューア）か、手動で有効にしたときだけ出す
@@ -2975,6 +3129,8 @@ ${body}</main></body></html>`;
       many = scanHit;
     }
     if (GM_getValue('hide:' + location.host, false) && !active) many = false; // このサイトでは出さない設定
+    // 小説のページでは、挿絵の保存した訳を出せるようにWTの仕組みを裏で動かしておく（ボタンは小説のまま）
+    if (!wtStarted && (active || (reader && many)) && illustOn() && window.top === window.self) { startWT(false); if (wtApi) { wtApi.show(false); if (novelOn) wtApi.illust(true); } }
     // WTモードのサイトでは、小説の「訳」の代わりにWTボタンを出す
     const wtPage = !!(wtApi && GM_getValue(wtKey(), false));
     wtPageNow = wtPage;
@@ -3032,6 +3188,18 @@ ${body}</main></body></html>`;
       L.push('  ' + (i + 1) + ': ' + (host || 'about:blank') + '（' + info + '）');
     });
     L.push('canvas: ' + document.querySelectorAll('canvas').length + '個 / 画像: ' + document.querySelectorAll('img').length + '枚');
+    if (window.top !== window.self) L.push('挿絵: ページ本体の方で訳します（小説の状態: ' + (novelOn ? '訳' : '原文') + '）');
+    else if (!illustOn()) L.push('挿絵: 設定でオフ');
+    else if (!wtApi) L.push('挿絵: まだ動いていません（「訳」を押すと動きます）');
+    else { try { L.push(...wtApi.diag()); } catch (e) { L.push('挿絵: 確認エラー ' + e.message); } }
+    try {
+      const ld = liveData && liveData.key === liveKey() ? liveData : GM_getValue(liveKey(), null);
+      const il = Object.values((ld && ld.illust) || {});
+      if (il.length) {
+        L.push('保存用の挿絵の記録: ' + il.length + '件');
+        il.forEach((x, i) => L.push(`  ${i + 1}: 「${stripTags(String(x.anchor || '（最初）')).slice(0, 14)}」の後（${x.how || '?'}）`));
+      }
+    } catch { /* なし */ }
     try {
       const bodies = findBodies();
       const n = bodies.reduce((a, r) => a + ko(r.textContent), 0);
@@ -3106,10 +3274,12 @@ ${body}</main></body></html>`;
 
   // ================= WT（まんが・ウェブトゥーン）翻訳モード =================
   // 画像の吹き出しを読み取って、訳を吹き出しの上に重ねる。サイトごとにオン／オフ（メニュー・設定から）
-  const wtKey = () => 'wt:' + location.hostname;
+  function wtKey() { return 'wt:' + location.hostname; } // 起動中の check() からも呼ばれるので、先に使える形にしておく
   const novelGeminiKey = () => { try { const c = cfg(); return (c.keys && c.keys.gemini) || ''; } catch { return ''; } };
   const novelGistToken = () => { try { return GM_getValue('cfg', {}).gistToken || ''; } catch { return ''; } };
-  var wtStarted = false, wtApi = null, wtSeenPage = '', wtPageNow = false;
+  // 起動中の check() が先にWTを動かしていることがあるので、ここでは上書きしない（上書きすると2つ目が動いてしまう）
+  var wtStarted, wtApi, wtSeenPage, wtPageNow;
+  if (wtStarted === undefined) { wtStarted = false; wtApi = null; wtSeenPage = ''; wtPageNow = false; }
   // WTボタンを⚙の横にぴったり合わせる。画面の大きさが変わったとき（アドレスバーの出し入れ・回転）もすぐ合わせ直す
   function syncWT() {
     if (!wtApi || !wtPageNow) return;
@@ -3130,7 +3300,12 @@ ${body}</main></body></html>`;
       sfx: !!S.sfx, dbg: !!S.debug, am: S.autoMemo !== false, ab: S.autoBackup !== false, gt: S.gistToken || '' };
   }
   // 小説モード ⇄ WTモード（サイトごと）
+  // 設定を閉じたときのモード切り替え。ここで何か失敗しても、設定画面は必ず閉じられるようにする
   function applyMode(tab) {
+    try { applyModeInner(tab); }
+    catch (e) { try { ui.toast('モードの切り替えでエラー：' + (e && e.message), 8000); } catch { /* 表示もできない */ } }
+  }
+  function applyModeInner(tab) {
     const wt = tab === 'wt', was = !!GM_getValue(wtKey(), false);
     if (wt === was) return;
     KZ_SET(wtKey(), wt);
@@ -3142,6 +3317,63 @@ ${body}</main></body></html>`;
     setTimeout(check, 50);
   }
   function toggleWT() { applyMode(GM_getValue(wtKey(), false) ? 'novel' : 'wt'); }
+  // 小説モードの挿絵：小説の「訳」を押したら挿絵の文字も訳し、「原」で原文に戻す（WTの仕組みを使う）
+  function illustOn() { try { return GM_getValue('cfg', {}).illust !== false; } catch { return false; } }
+  var illustByTap; if (illustByTap === undefined) illustByTap = false;
+  var lastTapKey; if (lastTapKey === undefined) lastTapKey = ''; // 最後に「訳」を押したときに見えていた挿絵 // 文のない画面（挿絵だけ）で「訳」を押して挿絵を訳しているところ
+  // 文のない画面で「訳」を押したとき：見えている挿絵を訳す（もう一度押すと原文に戻す）。挿絵がなければ false
+  function illustPendingNow() { try { return illustOn() && !GM_getValue(wtKey(), false) && window.top === window.self && wtApi ? wtApi.illustPending() : 0; } catch { return 0; } }
+  // ボタンの字を「今の画面で押すと何が起きるか」に合わせる（訳していない文・挿絵があれば「訳」、全部訳してあれば「原」）
+  function syncLabel() {
+    try {
+      if (busy || liveBusy || ui.isOpen() || document.hidden) return;
+      if (!liveData || liveData.key !== liveKey()) return; // 画面ごとに訳す読み方（カカオなど）のときだけ
+      const vis = deepRoots().flatMap(r => collectParas(r)).filter(el => !isUiText(el) && isOnScreen(el));
+      const newText = vis.some(el => ko(serialize(el)) >= 1);
+      const pend = illustPendingNow();
+      const shownIll = window.top === window.self && wtApi && illustOn() ? wtApi.illustShownNow() : 0;
+      const want = newText || pend ? '訳' : shownTranslated().length || shownIll ? '原' : '';
+      if (want) ui.fabShow(want);
+    } catch { /* そのまま */ }
+  }
+  setInterval(syncLabel, 1500);
+  function illustTap() {
+    try {
+      if (!illustOn() || GM_getValue(wtKey(), false)) return false;
+      const vk = window.top === window.self && wtApi ? wtApi.visibleIllustKey() : '';
+      if (novelOn) {
+        // 前に押したときと違う挿絵が出ている（次の場面に進んだ）なら、戻さずにその挿絵を訳す。続けて読めるように
+        // 同じ挿絵の画面でもう一度押したときだけ原文に戻す
+        // まだ訳していない挿絵が見えているなら訳す。全部訳してある画面で押したときは原文に戻す（ボタンの字のとおり）
+        const pend = window.top === window.self && wtApi ? wtApi.illustPending() : 0;
+        if (pend) { lastTapKey = vk; wtApi.illust(true); return true; }
+        lastTapKey = '';
+        ui.fabLabel('訳'); return true;
+      }
+      if (window.top === window.self && !wtApi) startWT(false);
+      const n = window.top === window.self ? (wtApi ? wtApi.visibleIllust() : 0)
+        : [...document.images].filter(i => { const r = i.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight && r.width >= Math.min(300, innerWidth * 0.6) && r.height >= 100 && !i.closest('a'); }).length;
+      if (!n) return false;
+      illustByTap = true;
+      lastTapKey = vk;
+      ui.fabLabel('原');
+      return true;
+    } catch { return false; }
+  }
+  var novelOn; if (novelOn === undefined) novelOn = false;
+  function onNovelState(v) {
+    if (novelOn === v) return;
+    novelOn = v;
+    if (!v) illustByTap = false;
+    if (window.top !== window.self) { try { window.top.postMessage({ kztlIllust: v }, location.origin); } catch { /* 外に送れない */ } }
+    else if (wtApi) wtApi.illust(v);
+  }
+  // 本文がiframeの中にあるサイト：iframeの中の「訳」の状態を、挿絵を訳す外側に伝える（同じサイトのiframeからだけ受け取る）
+  if (window.top === window.self) addEventListener('message', e => {
+    if (e.origin !== location.origin || !e.data || typeof e.data.kztlIllust !== 'boolean') return;
+    if (!wtApi && e.data.kztlIllust && illustOn()) { startWT(false); setTimeout(check, 0); }
+    if (wtApi) wtApi.illust(e.data.kztlIllust);
+  });
   function startWT() {
     if (wtStarted || window.top !== window.self) return;
     wtStarted = true;
@@ -3183,8 +3415,14 @@ ${body}</main></body></html>`;
         const s = JSON.stringify(v);
         if (typeof GM_setValue === 'function') GM_setValue(k, s);
         else localStorage.setItem(k, s);
-      } catch (e) {}
+        return true;
+      } catch (e) {
+        // 保存に失敗した（容量いっぱいなど）：診断で分かるように記録する
+        store.fails = (store.fails || 0) + 1; store.lastErr = String((e && e.message) || e).slice(0, 80);
+        return false;
+      }
     },
+    fails: 0, lastErr: '', saved: 0, noKey: 0,
   };
 
   let S = Object.assign({}, DEFAULTS, store.get('ezc_settings', {}));
@@ -3199,6 +3437,20 @@ ${body}</main></body></html>`;
   // 翻訳の保存：画像の「中身」から作った指紋で保存する。
   // RidiのようにURLが毎回変わる(blob:)サイトでも、同じ画像なら再翻訳しない（API代の節約）
   const CIDX = 'ezc_cidx', CMAX = 20000;
+  // 保存した訳の一覧と見た目の索引は大きい（最大2万件）。画像1枚ごとに丸ごと書き直すとスマホでは重く、
+  // 書き込みが追いつかずに保存が残らないことがあるので、メモリに持って数秒ごと・画面を離れるときにまとめて書く
+  let cidxMem = null, cidxDirty = false, flushTimer = 0;
+  const hDirty = new Set();
+  function getIdx() { if (!cidxMem) cidxMem = store.get(CIDX, []); return cidxMem; }
+  function setIdx(arr, now) { cidxMem = arr; cidxDirty = true; if (now) flushIdx(); else flushLater(); }
+  function flushLater() { clearTimeout(flushTimer); flushTimer = setTimeout(flushIdx, 3000); }
+  function flushIdx() {
+    clearTimeout(flushTimer);
+    if (cidxDirty && cidxMem) { if (store.set(CIDX, cidxMem)) cidxDirty = false; }
+    for (const k of [...hDirty]) { if (store.set(k, hIdxMem.get(k) || [])) hDirty.delete(k); }
+  }
+  addEventListener('pagehide', flushIdx);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushIdx(); });
   function del(k) {
     try {
       if (typeof GM_deleteValue === 'function') GM_deleteValue(k);
@@ -3210,18 +3462,18 @@ ${body}</main></body></html>`;
   // 保存した順番（新しいほど大きい）
   let recency = null;
   function recencyMap() {
-    if (!recency) { recency = new Map(); store.get(CIDX, []).forEach((k, i) => recency.set(k, i)); }
+    if (!recency) { recency = new Map(); getIdx().forEach((k, i) => recency.set(k, i)); }
     return recency;
   }
   function cachePut(k, v) {
     if (!k) return;
     store.set('ezc_c:' + k, v);
-    const idx = store.get(CIDX, []);
+    const idx = getIdx();
     const i = idx.indexOf(k);
     if (i >= 0) idx.splice(i, 1);
     idx.push(k);
     while (idx.length > CMAX) { const o = idx.shift(); del('ezc_c:' + o); del('ezc_t:' + o); del('ezc_e:' + o); }
-    store.set(CIDX, idx);
+    setIdx(idx);
     recency = null;
     markDirty();
   }
@@ -3375,7 +3627,7 @@ ${body}</main></body></html>`;
     arr.push({ h: d.rh, k: key });
     while (arr.length > 3000) arr.shift();
     hIdxMem.set(k, arr);
-    store.set(k, arr);
+    hDirty.add(k); flushLater(); // まとめて書く
   }
 
   function hamming(a, b) {
@@ -3385,8 +3637,8 @@ ${body}</main></body></html>`;
   }
   function cacheClear() {
     for (const k of dataKeys()) del(k);
-    for (const k of store.get(CIDX, [])) del('ezc_c:' + k);
-    store.set(CIDX, []);
+    for (const k of getIdx()) del('ezc_c:' + k);
+    setIdx([], true);
   }
   if (store.get('ezc_cache', null)) del('ezc_cache'); // 旧形式の保存を片付け
   // この作品の記録だけ（訳・話の記録・メモ）
@@ -3398,7 +3650,7 @@ ${body}</main></body></html>`;
     const ks = workDataKeys(h);
     ks.forEach(del);
     const gone = new Set(ks.filter((k) => k.startsWith('ezc_c:')).map((k) => k.slice(6)));
-    store.set(CIDX, store.get(CIDX, []).filter((k) => !gone.has(k)));
+    setIdx(getIdx().filter((k) => !gone.has(k)), true);
     return ks.length;
   }
 
@@ -3440,14 +3692,34 @@ ${body}</main></body></html>`;
     for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 0x01000193) >>> 0;
     return h.toString(36);
   }
-  const pageKey = () => 'ezc_p:' + strHash(location.host + location.pathname + location.search);
-  const imgIndex = (img) => Array.prototype.indexOf.call(document.images, img);
+  // 話の記録の住所：パス＋話を表す項目だけ（ログインの印・時刻など日によって変わる項目が混ざると、次の日に前の記録が見つからなくなるため）
+  const PKQ = /^(no|titleid|ep|episode|episodeid|episode_id|chapter|chapterid|chapter_id|seq|vol|volume|id|bookid|book_id|productid|product_id|novelid|novel_id|chapterno|page)$/i;
+  const pageKey = () => {
+    const q = [...new URLSearchParams(location.search)].filter(([k]) => PKQ.test(k)).map(([k, v]) => k + '=' + v).join('&');
+    return 'ezc_p:' + strHash(location.host + location.pathname + (q ? '?' + q : ''));
+  };
+  const oldPageKey = () => 'ezc_p:' + strHash(location.host + location.pathname + location.search); // 前の版の住所
+  // 画像の番号（保存した訳を「この話の何番目の画像か」で探すのに使う）。
+  // ページ本体の画像は前と同じ数え方。iframe・シャドウDOMの中の画像だけ、後ろに別の番号を付ける
+  const imgIndex = (img) => {
+    const i = Array.prototype.indexOf.call(document.images, img);
+    if (i >= 0) return i;
+    const j = allImgs(true).indexOf(img);
+    return j >= 0 ? 100000 + j : -1;
+  };
   function pageKeyAt(img, d) {
-    const p = store.get(pageKey(), null);
-    const e = p && p.idx && p.idx[imgIndex(img)];
-    // 位置と大きさが同じでも、見た目の指紋が違えば別の画像（古い記録で指紋がないものは使わない）
-    return e && e.w === d.w && e.h === d.h && e.dh && d.dh && hamming(e.dh, d.dh) <= 6 ? e.key : null;
+    const i = imgIndex(img);
+    let p = store.get(pageKey(), null);
+    let e = p && p.idx && p.idx[i];
+    if (!e && oldPageKey() !== pageKey()) { p = store.get(oldPageKey(), null); e = p && p.idx && p.idx[i]; } // 前の版で記録した話
+    // 位置と大きさが同じでも、見た目の指紋が大きく違えば別の画像（古い記録で指紋がないものは使わない）。
+    // 別のブラウザ・端末（クラウドから戻した記録）では画像の縮め方が少し違い、指紋が少しずれるので、少し広めに許す
+    posDist = 99;
+    if (!(e && e.w === d.w && e.h === d.h && e.dh && d.dh)) return null;
+    posDist = hamming(e.dh, d.dh);
+    return posDist <= 14 ? e.key : null;
   }
+  let posDist = 99; // 最後に「位置」で見つけた記録との指紋のずれ
   function pageRemember(img, d, key) {
     if (!key) return;
     const k = pageKey();
@@ -3505,6 +3777,7 @@ ${body}</main></body></html>`;
   let memoBusy = false, memoFailAt = 0;
   async function updateMemo(manual) {
     if ((!S.autoMemo && !manual) || memoBusy) return;
+    if (!manual && illustMode()) return; // 小説の挿絵では作品メモを作らない（料金の節約。小説の作品メモは別にある）
     if (!manual && Date.now() - memoFailAt < 5 * 60000) return; // 失敗した直後は、画像ごとに何度も頼まない（翻訳の回数制限を食わないように）
     if (!keyOf()) { if (manual) toast('APIキーを入れてね'); return; }
     const pages = pendingMemoPages();
@@ -3573,10 +3846,14 @@ ${w.story || '（なし）'}
     }
     // クラウドにだけある記録（ほかの端末で訳した分など）も残す。両方にあるものはこの端末を優先して合わせる
     if (remote && typeof remote === 'object') {
+      let nc = Object.keys(data).filter((k) => k.startsWith('ezc_c:')).length;
       for (const [k, rv] of Object.entries(remote)) {
         if (!DATA_PREFIX.test(k) || /^ezc_(h|a|t):/.test(k) || rv == null) continue;
         const cur = data[k];
-        if (cur == null) { data[k] = rv; continue; }
+        if (cur == null) {
+          if (k.startsWith('ezc_c:')) { if (nc >= CMAX) continue; nc++; } // 増えすぎないように上限まで
+          data[k] = rv; continue;
+        }
         if (k.startsWith('ezc_p:') && typeof cur === 'object') {
           const v = Object.assign({}, cur, { idx: Object.assign({}, rv.idx || {}, cur.idx || {}) });
           if ((rv.lines || []).length > (cur.lines || []).length) v.lines = rv.lines;
@@ -3612,10 +3889,10 @@ ${w.story || '（なし）'}
     if (!file) return null;
     return file.truncated ? await gh('GET', file.raw_url) : file.content;
   }
-  let backupRunning = false;
+  let backupRunning = false, backupAgain = false;
   async function backupNow(manual) {
     if (!tokOf()) { if (manual) toast('設定でGitHubのトークンを入れてね'); return; }
-    if (backupRunning) { if (manual) toast('クラウドに保存中'); return; }
+    if (backupRunning) { backupAgain = true; if (manual) toast('クラウドに保存中'); return; }
     backupRunning = true;
     backupDirty = false; // 送っている間に増えた訳は、次の回で送る
     try {
@@ -3635,7 +3912,10 @@ ${w.story || '（なし）'}
     } catch (e) {
       backupDirty = true;
       if (manual) toast('クラウド保存に失敗：' + e.message);
-    } finally { backupRunning = false; }
+    } finally {
+      backupRunning = false;
+      if (backupAgain) { backupAgain = false; if (backupDirty) markDirty(); }
+    }
   }
   async function restoreFromCloud() {
     if (!tokOf()) return toast('設定でGitHubのトークンを入れてね');
@@ -3664,7 +3944,7 @@ ${w.story || '（なし）'}
     let j;
     try { j = JSON.parse(text); } catch (e) { return toast('読み込めない：ファイルの形式が違う'); }
     if (!j || !j.data || typeof j.data !== 'object') return toast('読み込めない：このスクリプトの書き出しファイルじゃない');
-    const idx = store.get(CIDX, []);
+    const idx = getIdx();
     const have = new Set(idx);
     let n = 0;
     for (const [k, v] of Object.entries(j.data)) {
@@ -3682,7 +3962,7 @@ ${w.story || '（なし）'}
       if (k.startsWith('ezc_c:') && !have.has(k.slice(6))) { idx.push(k.slice(6)); have.add(k.slice(6)); }
       n++;
     }
-    store.set(CIDX, idx);
+    setIdx(idx, true);
     recency = null;
     let setMsg = '';
     if (j.settings && typeof j.settings === 'object') {
@@ -3692,6 +3972,7 @@ ${w.story || '（なし）'}
       setMsg = '・設定も反映';
     }
     toast(`訳の記録を読み込んだ（${n}件${setMsg}）`);
+    waiting.clear(); // 読み込んだ訳で出せるようになった画像を、もう一度調べる
     if (isOn()) translateVisibleNow();
   }
 
@@ -3801,10 +4082,16 @@ ${w.story || '（なし）'}
       properties: {
         box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } },
         area_2d: { type: 'ARRAY', items: { type: 'INTEGER' } },
+        lines_2d: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'INTEGER' } } },
         src: { type: 'STRING' },
         tr: { type: 'STRING' },
         kind: { type: 'STRING', enum: ['speech', 'narration', 'sfx', 'sign'] },
         img: { type: 'INTEGER' },
+        angle: { type: 'INTEGER' },
+        bold: { type: 'BOOLEAN' },
+        italic: { type: 'BOOLEAN' },
+        strike: { type: 'BOOLEAN' },
+        underline: { type: 'BOOLEAN' },
         color: { type: 'STRING' },
         stroke: { type: 'STRING' },
       },
@@ -3818,11 +4105,15 @@ ${w.story || '（なし）'}
 - 吹き出し・テキスト枠ごとに1項目。同じ吹き出し・同じ枠の複数行は、画像の区切りをまたいでいても必ず1項目にまとめる（行ごとに分けない）。枠なしの文も、続いている1つの文なら行ごとに文字の大きさ・色・縁取りが違っても1項目にまとめ、box_2d は全部の行を囲む（途中の行だけ囲まない）。
 - 画像は縦に続く1つの場面を上から順に区切ったもの（区切りの境目は少し重なっている）。各項目の img にその文字がある画像番号を入れる。
 - box_2d は [ymin, xmin, ymax, xmax]、その画像に対する0〜1000の整数。原文の文字そのものだけをぴったり囲む（吹き出しの余白は含めない）。
+- lines_2d：吹き出しの外の文（narration・sign）で3行以上あるときだけ、各行を1行ずつ囲んだ箱 [ymin, xmin, ymax, xmax] の配列。色や大きさが違う行（最後だけ赤字など）も漏らさず全部入れる。吹き出しのセリフや2行以下の文では省く（返事を短くするため）。
 - area_2d も同じ形式で、訳を書いてよい範囲。吹き出しなら吹き出しの線の内側（線や外の絵は含めない）。枠の無い文字は box_2d と同じでいい。
 - kind: speech=吹き出しのセリフ、narration=ナレーション・独白（四角い枠の文、枠なしで白地や絵の上に直接書かれた文、色付きの文字も含む）、sfx=擬音語・擬態語だけ（「ドン」「ザワ」など）、sign=看板・スマホ画面など作中の文字。
 - 枠や吹き出しが無くても、文になっている文字は必ず拾う（見落とさない）。白地や絵の上に大きく書かれた文字、装飾文字、紫・緑など色付きの文字の独白も全部含める。文になっているものは sfx にしない。
 - 画像の端で途中から始まる・途中で切れている文も、見えている部分を拾う。
 - 大きな文字を1文字ずつ縦に並べた縦書きの文も、1つの文なら1項目。列が複数あって1つの文になっていれば、読む順につないで1項目にし、box_2d は全部の列を囲む。
+- 1つの項目の中で一部の行・言葉だけ文字色が違う（黒い文の最後の行だけ赤字など）ときは、tr の中でその部分にあたる訳を ⟦#RRGGBB|訳⟧ で囲む（色はその部分の原文の色）。項目全体が同じ色なら使わない。灰色の文の中の一部の言葉だけ黒い、のような言葉ごとの色の違いも同じように囲む。
+- 文字の見た目：項目全体が太字なら bold、斜体（字が斜めに傾いている）なら italic、字の上に横線（取り消し線）があれば strike、下線があれば underline を true に。文字の行そのものが斜めに置かれているときは angle にその傾き（度。右上がりはマイナス、右下がりはプラス）。水平なら0。
+- 一部の言葉だけ見た目が違うときは、tr の中のその部分を ⟦印|訳⟧ で囲む。印は色 #RRGGBB と b（太字）・i（斜体）・s（取り消し線）・u（下線）をカンマでつなぐ（例：⟦#e8352a,b|訳⟧、⟦s|訳⟧）。
 - color: 原文の文字色を #RRGGBB で。stroke: 原文の文字にフチ（縁取り）があればその色を #RRGGBB で、なければ空文字。
 - 訳は漫画として自然な話し言葉にし、キャラの口調・感情・語尾のニュアンスを残す。説明的にしない。長さは原文と同程度に。
 - 人名：韓国の人名は姓も名も全部カタカナにする（姓だけ漢字にしない。例：김독자→キム・ドクチャ、이현성→イ・ヒョンソン）。姓と名の間は「・」。中国の人名は日本の漢字（新字体）。英語の人名はカタカナ。
@@ -3970,13 +4261,93 @@ ${w.story || '（なし）'}
     return out;
   }
 
+  // ---------- ページの奥の画像も探す（シャドウDOM・同じドメインのiframeの中。カカオの小説ビューアの挿絵など） ----------
+  let deepCache = { at: 0, roots: [] };
+  const hookedDocs = new WeakSet();
+  function hookFrame(d) {
+    try {
+      // iframeの中のページが変わる（次の話）と文書も変わるので、文書ごとに付ける
+      if (!d || hookedDocs.has(d)) return;
+      hookedDocs.add(d);
+      // iframeの中のスクロールは外に伝わらないので、そこでも訳の位置を追いかける
+      d.addEventListener('scroll', () => {
+        replaceVisible();
+        if (isOn() && !pageActive()) { clearTimeout(nearTimer); nearTimer = setTimeout(translateVisibleNow, 250); }
+      }, { passive: true, capture: true });
+      if (d.defaultView) d.defaultView.addEventListener('resize', () => replaceVisible());
+      d.addEventListener('click', blockZoom, true);
+    } catch (e) { /* 触れないフレーム */ }
+  }
+  // 小説モードで挿絵の訳を表示しているときは、挿絵のタップで拡大表示にしない（拡大した絵と訳がずれて読みにくいため）。
+  // 左右の端（ページめくりに使うサイトがある）はそのまま通す
+  function blockZoom(e) {
+    try {
+      if (!illustMode() || document.documentElement.classList.contains('ezc-off')) return;
+      const doc = (e.target && e.target.ownerDocument) || document, x = e.clientX, y = e.clientY;
+      const hit = allImgs().some((i) => {
+        if (i.ownerDocument !== doc || !(lastItems.get(i) || []).length) return false;
+        const r = i.getBoundingClientRect();
+        return y >= r.top && y <= r.bottom && x >= r.left + r.width * 0.2 && x <= r.right - r.width * 0.2;
+      });
+      if (!hit) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+    } catch (er) { /* 何もしない */ }
+  }
+  addEventListener('click', blockZoom, true);
+  function wtDeepRoots() {
+    const now = Date.now();
+    if (now - deepCache.at < 1500) return deepCache.roots;
+    const roots = [];
+    const scan = (node, depth) => {
+      for (const el of node.querySelectorAll('*')) {
+        if (el.id === 'kztl-host') continue;
+        if (el.shadowRoot) { roots.push(el.shadowRoot); scan(el.shadowRoot, depth); }
+        if (el.tagName === 'IFRAME' && depth < 2) {
+          try { const d = el.contentDocument; if (d && d.documentElement) { roots.push(d); hookFrame(d); scan(d, depth + 1); } } catch (e) { /* 別ドメインのiframeは読めない */ }
+        }
+      }
+    };
+    try { scan(document, 0); } catch (e) { /* 準備前 */ }
+    deepCache = { at: now, roots };
+    return roots;
+  }
+  // ページの画像すべて（ページ本体の画像が先。並び順は今までと同じ）
+  let imgsCache = { at: 0, list: [] };
+  function allImgs(fresh) {
+    // 何度も呼ばれるので、少しの間は前の結果を使う（ページ全体を毎回探すと重い）。
+    // ただし画像が増えた・消えたときは作り直す（読み進めると画像が足されるサイトで、新しい画像を見落とさないように）
+    const now = Date.now();
+    if (!fresh && now - imgsCache.at < 800 && imgsCache.top === document.images.length && imgsCache.list.every((i) => i.isConnected)) return imgsCache.list;
+    const out = [...document.images];
+    for (const r of wtDeepRoots()) { try { out.push(...r.querySelectorAll('img')); } catch (e) { /* 消えた場所 */ } }
+    imgsCache = { at: now, list: out, top: document.images.length };
+    return out;
+  }
+  // 画面（いちばん外のページ）から見た位置。iframeの中の画像は、iframeの位置を足す
+  function rectOf(el) {
+    const r = el.getBoundingClientRect();
+    let dx = 0, dy = 0, clip = null;
+    try {
+      for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
+        const f = w.frameElement, fr = f.getBoundingClientRect();
+        const ox = fr.left + f.clientLeft, oy = fr.top + f.clientTop;
+        // 見えているのはiframeの枠の中だけ（外側のiframeの枠とも重ねる）
+        const box = { left: ox, top: oy, right: ox + f.clientWidth, bottom: oy + f.clientHeight };
+        if (clip) clip = { left: Math.max(box.left, clip.left + ox), top: Math.max(box.top, clip.top + oy), right: Math.min(box.right, clip.right + ox), bottom: Math.min(box.bottom, clip.bottom + oy) };
+        else clip = box;
+        dx += ox; dy += oy;
+      }
+    } catch (e) { /* 外側に触れない */ }
+    return dx || dy || clip ? { left: r.left + dx, right: r.right + dx, top: r.top + dy, bottom: r.bottom + dy, width: r.width, height: r.height, clip } : r;
+  }
+
   // 上下に隙間なく並んだ画像（ウェブトゥーンの1枚が複数画像に分かれているもの）を探す
   function neighbors(img) {
-    const r = img.getBoundingClientRect();
+    const r = rectOf(img);
     let prev = null, next = null;
-    for (const o of document.images) {
+    for (const o of allImgs()) {
       if (o === img || !o.complete || !o.naturalWidth || o.closest('.ezc-ov')) continue;
-      const q = o.getBoundingClientRect();
+      const q = rectOf(o);
       if (Math.abs(q.left - r.left) > r.width * 0.05 || Math.abs(q.width - r.width) > r.width * 0.05) continue;
       if (Math.abs(q.bottom - r.top) <= 6) prev = o;
       else if (Math.abs(q.top - r.bottom) <= 6) next = o;
@@ -4126,7 +4497,7 @@ ${w.story || '（なし）'}
   // 文字の形だけを消す板。四角ごとぼかすと絵（顔など）まで消えるので、
   // 「周りの色と違う画素」＝文字とフチの画素だけを、周りの色で塗った透明な画像を作る
   // st: 仮想の1枚 / pv: 色の板の範囲（仮想座標）/ col: 色の板 8×8 / cbv: 消す範囲（仮想座標）/ fg, stroke: 原文の文字色・フチ色
-  function makeGlyphCover(st, pv, col, cbv, fg, stroke) {
+  function makeGlyphCover(st, pv, col, cbv, fg, stroke, more) {
     const G = 8;
     const MW = 140, MH = Math.max(8, Math.min(320, Math.round(MW * cbv.h / Math.max(1, cbv.w))));
     const cv = document.createElement('canvas');
@@ -4149,6 +4520,7 @@ ${w.story || '（なし）'}
     const hexRGB = (h) => (h ? [1, 3, 5].map((i) => parseInt(h.substr(i, 2), 16)) : null);
     let tf = hexRGB(fg), ts = hexRGB(stroke);
     const near = (o, c) => c && Math.abs(px[o] - c[0]) + Math.abs(px[o + 1] - c[1]) + Math.abs(px[o + 2] - c[2]) < 150;
+    const nearX = (o, c) => c && Math.abs(px[o] - c[0]) + Math.abs(px[o + 1] - c[1]) + Math.abs(px[o + 2] - c[2]) < 210; // 色付きの字のにじみまで
     const mask = new Uint8Array(MW * MH), fill = new Array(MW * MH), dif = new Uint8Array(MW * MH);
     for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
       const i = y * MW + x, o = i * 4;
@@ -4173,12 +4545,28 @@ ${w.story || '（なし）'}
       if (top[0] && top[0][1] / tot > 0.15) tf = toRGB(top[0][0]);
       if (top[1] && top[1][1] / tot > 0.1) ts = toRGB(top[1][0]);
     }
+    // 1つの文で行ごとに色が違う（黒い文の最後だけ赤など）ときのため、周りと違う画素に多い色も文字色に足す
+    const extra = [];
+    if (tf || ts) {
+      const cnt = new Map(); let tot = 0;
+      for (let i = 0; i < MW * MH; i++) {
+        const o = i * 4;
+        if (!dif[i] || px[o + 3] === 0 || near(o, tf) || near(o, ts)) continue;
+        const k = ((px[o] >> 5) << 6) | ((px[o + 1] >> 5) << 3) | (px[o + 2] >> 5);
+        cnt.set(k, (cnt.get(k) || 0) + 1); tot++;
+      }
+      let difN = 0; for (let i = 0; i < MW * MH; i++) if (dif[i]) difN++;
+      const toRGB = (k) => [((k >> 6) & 7) * 32 + 16, ((k >> 3) & 7) * 32 + 16, (k & 7) * 32 + 16];
+      for (const [k, n] of [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)) if (n / Math.max(1, difN) > 0.03) extra.push(toRGB(k));
+    }
+    // 行ごとの字の色（赤い最後の行など、全体の中では少ない色も確実に消す）
+    for (const h of more || []) { const c = hexRGB(h); if (c && !extra.some((e) => Math.abs(e[0] - c[0]) + Math.abs(e[1] - c[1]) + Math.abs(e[2] - c[2]) < 60)) extra.push(c); }
     let on = 0, all = 0;
     for (let i = 0; i < MW * MH; i++) {
       if (px[i * 4 + 3] === 0) continue;
       all++;
       // 文字色・フチ色に近い画素だけ（絵の線を巻き込みにくい）
-      if (dif[i] && (!tf && !ts || near(i * 4, tf) || near(i * 4, ts))) { mask[i] = 1; on++; }
+      if (dif[i] && (!tf && !ts || near(i * 4, tf) || near(i * 4, ts) || extra.some((c) => nearX(i * 4, c)))) { mask[i] = 1; on++; }
     }
     // ほとんど全部が「文字」になる＝見分けられていない。そのときは範囲全体をふちぼかしで塗る
     const solid = all > 0 && on / all > 0.55;
@@ -4191,7 +4579,7 @@ ${w.story || '（なし）'}
     }
     // 2画素ふくらませて（文字のにじみ・フチの外側まで）、少しぼかす
     const grow = (m) => { const n = new Uint8Array(m); for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) if (m[y * MW + x]) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < MW && yy < MH) n[yy * MW + xx] = 1; } return n; };
-    const m2 = grow(grow(mask));
+    const m2 = extra.length ? grow(grow(grow(mask))) : grow(grow(mask)); // 色付きの字があるときは少し広めに消す
     for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
       const i = y * MW + x, o = i * 4;
       let a = 0, n = 0;
@@ -4215,7 +4603,8 @@ ${w.story || '（なし）'}
     const cb = mp.cb, pad = 0.09; // 文字のまわり（板の9%＝文字の約2割）まで見る。消すのは文字色の画素だけなので広くても絵は残る
     const cr = { x: pr.x + (cb.x - pad) * pr.w, y: pr.y + (cb.y - pad) * pr.h, w: (cb.w + pad * 2) * pr.w, h: (cb.h + pad * 2) * pr.h };
     const cbv = { x: cr.x * W, y: offY + cr.y * H, w: cr.w * W, h: cr.h * H };
-    it.cimg = makeGlyphCover(st, pv, mp.col, cbv, it.fgHex, it.stroke);
+    const more = [...(it.pal || []), ...(it.lb || []).map((x) => x.c), ...(it.cr || []).map((x) => x[2] || '')].filter((h) => /^#[0-9a-f]{6}$/i.test(h || ''));
+    it.cimg = makeGlyphCover(st, pv, mp.col, cbv, it.fgHex, it.stroke, more);
     it.crect = cr;
     delete it.patch; delete it.pr; delete it.cb;
   }
@@ -4276,8 +4665,25 @@ ${w.story || '（なし）'}
       let [y0, x0, y1, x1] = a.box_2d.map(Number);
       if (y1 < y0) [y0, y1] = [y1, y0];
       if (x1 < x0) [x0, x1] = [x1, x0];
+      // 行ごとの箱があれば、全部の行が入るように広げる（色の違う最後の行などが枠から漏れて、原文が消えずに残らないように）
+      const lines = [];
+      if (Array.isArray(a.lines_2d)) {
+        for (const l of a.lines_2d) {
+          if (!Array.isArray(l) || l.length !== 4) continue;
+          let [ly0, lx0, ly1, lx1] = l.map(Number);
+          if (![ly0, lx0, ly1, lx1].every(Number.isFinite)) continue;
+          if (ly1 < ly0) [ly0, ly1] = [ly1, ly0];
+          if (lx1 < lx0) [lx0, lx1] = [lx1, lx0];
+          if (ly1 - ly0 <= 0 || lx1 - lx0 <= 0) continue;
+          // 箱から遠く離れた行（別の吹き出しの行の取り違え）は使わない
+          const gap = Math.max(0, ly0 - y1, y0 - ly1);
+          if (gap > Math.max(60, (y1 - y0) * 0.5)) continue;
+          y0 = Math.min(y0, ly0); y1 = Math.max(y1, ly1); x0 = Math.min(x0, lx0); x1 = Math.max(x1, lx1);
+          lines.push({ x0: lx0 / 1000, x1: lx1 / 1000, y0: c.y + (ly0 / 1000) * c.h, y1: c.y + (ly1 / 1000) * c.h });
+        }
+      }
       const r = { a, x0: x0 / 1000, x1: x1 / 1000, y0: c.y + (y0 / 1000) * c.h, y1: c.y + (y1 / 1000) * c.h,
-        src: String(a.src || '').trim(), tr: String(a.tr).trim(), kind: a.kind, ar: null };
+        src: String(a.src || '').trim(), tr: String(a.tr).trim(), kind: a.kind, ar: null, lines };
       if (Array.isArray(a.area_2d) && a.area_2d.length === 4) {
         let [ay0, ax0, ay1, ax1] = a.area_2d.map(Number);
         if (ay1 < ay0) [ay0, ay1] = [ay1, ay0];
@@ -4320,6 +4726,7 @@ ${w.story || '（なし）'}
         u.tr = joinTr(u.tr, l.tr);
         u.src = (u.src + ' ' + l.src).trim();
         u.x0 = Math.min(u.x0, l.x0); u.x1 = Math.max(u.x1, l.x1); u.y0 = Math.min(u.y0, l.y0); u.y1 = Math.max(u.y1, l.y1);
+        u.lines = (u.lines || []).concat(l.lines || []);
         if (l.ar) u.ar = u.ar ? { x0: Math.min(u.ar.x0, l.ar.x0), x1: Math.max(u.ar.x1, l.ar.x1), y0: Math.min(u.ar.y0, l.ar.y0), y1: Math.max(u.ar.y1, l.ar.y1) } : l.ar;
         if (u.kind !== l.kind && (u.kind === 'narration' || l.kind === 'narration')) u.kind = 'narration';
         raw.splice(raw.indexOf(l), 1);
@@ -4327,6 +4734,88 @@ ${w.story || '（なし）'}
       }
     }
     return raw;
+  }
+
+  // その行の字の色（周りの地の色と違う画素でいちばん多い色）。分からなければ ''
+  const icv = document.createElement('canvas');
+  const ig = icv.getContext('2d', { willReadFrequently: true });
+  function inkColor(st, l) {
+    try {
+      const MW = 64, MH = 12;
+      icv.width = MW; icv.height = MH;
+      ig.clearRect(0, 0, MW, MH);
+      const vx = l.x0 * st.W, vw = (l.x1 - l.x0) * st.W, vh = l.y1 - l.y0;
+      if (vw <= 0 || vh <= 0) return '';
+      drawStrip(ig, st, vx, l.y0, vw, vh, 0, 0, MW, MH);
+      const px = ig.getImageData(0, 0, MW, MH).data;
+      // 地の色：いちばん多い色。字の色：地の色とはっきり違う色のうち、いちばん多い色
+      const cnt = new Map();
+      for (let i = 0; i < MW * MH; i++) {
+        const o = i * 4;
+        if (px[o + 3] < 200) continue;
+        const k = ((px[o] >> 5) << 6) | ((px[o + 1] >> 5) << 3) | (px[o + 2] >> 5);
+        cnt.set(k, (cnt.get(k) || 0) + 1);
+      }
+      const rgb = (k) => [((k >> 6) & 7) * 32 + 16, ((k >> 3) & 7) * 32 + 16, (k & 7) * 32 + 16];
+      const sorted = [...cnt.entries()].sort((a, b) => b[1] - a[1]);
+      if (!sorted.length) return '';
+      const bg = rgb(sorted[0][0]);
+      for (const k of [...cnt.keys()]) { const c = rgb(k); if (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) < 140) cnt.delete(k); }
+      const top = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (!top || top[1] < 6) return '';
+      const k = top[0], h2 = (v) => Math.min(255, v * 32 + 16).toString(16).padStart(2, '0');
+      return '#' + h2((k >> 6) & 7) + h2((k >> 3) & 7) + h2(k & 7);
+    } catch (e) { return ''; }
+  }
+
+  // 各行のどこに何色の字があるか（文字の色の並びで絵を描いている文：縄・模様など）。
+  // pal：色の一覧、lp：行ごとに左から32マスの色番号（'-'は字なし）
+  function lineProfiles(st, lines) {
+    try {
+      const K = 32;
+      const rgb = (k) => [((k >> 6) & 7) * 32 + 16, ((k >> 3) & 7) * 32 + 16, (k & 7) * 32 + 16];
+      const dist = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+      const pal = [], cols = [];
+      const palIdx = (c) => {
+        for (let i = 0; i < pal.length; i++) if (dist(pal[i], c) < 90) return i;
+        if (pal.length >= 8) { let bi = 0, bd = 1e9; pal.forEach((p2, i) => { const d2 = dist(p2, c); if (d2 < bd) { bd = d2; bi = i; } }); return bi; }
+        pal.push(c); return pal.length - 1;
+      };
+      const lp = lines.map((l) => {
+        // 縮めると字の色が地の色と混ざって薄くなるので、なるべく元の大きさのまま見る
+        const MW = Math.max(K * 3, Math.min(480, Math.round((l.x1 - l.x0) * st.W))), MH = Math.max(8, Math.min(64, Math.round(l.y1 - l.y0)));
+        icv.width = MW; icv.height = MH;
+        ig.clearRect(0, 0, MW, MH);
+        const vx = l.x0 * st.W, vw = (l.x1 - l.x0) * st.W, vh = l.y1 - l.y0;
+        if (vw <= 0 || vh <= 0) return '-'.repeat(K);
+        drawStrip(ig, st, vx, l.y0, vw, vh, 0, 0, MW, MH);
+        const px = ig.getImageData(0, 0, MW, MH).data;
+        // 色を512通りにまとめて数える（軽くするため、箱の配列で数える）
+        const keyAt = new Int16Array(MW * MH), all = new Uint32Array(512);
+        for (let i = 0; i < MW * MH; i++) { const o = i * 4; if (px[o + 3] < 200) { keyAt[i] = -1; continue; } const k = ((px[o] >> 5) << 6) | ((px[o + 1] >> 5) << 3) | (px[o + 2] >> 5); keyAt[i] = k; all[k]++; }
+        let bk = -1; for (let k = 0; k < 512; k++) if (all[k] && (bk < 0 || all[k] > all[bk])) bk = k;
+        if (bk < 0) return '-'.repeat(K);
+        const bg = rgb(bk);
+        const ink = new Uint8Array(512); for (let k = 0; k < 512; k++) ink[k] = all[k] && dist(rgb(k), bg) >= 140 ? 1 : 0;
+        const cnt = new Uint32Array(512);
+        let out = '';
+        for (let c = 0; c < K; c++) {
+          const x0 = Math.floor((c * MW) / K), x1 = Math.floor(((c + 1) * MW) / K);
+          cnt.fill(0);
+          let tk = -1;
+          for (let y = 0; y < MH; y++) for (let x = x0; x < x1; x++) {
+            const k = keyAt[y * MW + x];
+            if (k < 0 || !ink[k]) continue;
+            if (++cnt[k] > (tk < 0 ? 0 : cnt[tk])) tk = k;
+          }
+          out += tk >= 0 && cnt[tk] >= Math.max(3, (x1 - x0) * MH * 0.03) ? String(palIdx(rgb(tk))) : '-';
+        }
+        return out;
+      });
+      if (!pal.length) return null;
+      const h2 = (v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0');
+      return { pal: pal.map((c) => '#' + c.map(h2).join('')), lp };
+    } catch (e) { return null; }
   }
 
   // ストリップ座標の1項目を、その画像（span：ストリップ上の位置）用の表示データにする
@@ -4339,6 +4828,21 @@ ${w.story || '（なし）'}
       area: null, tr: r.tr, kind: r.kind, src: r.src,
     };
     if (it.w <= 0 || it.h <= 0) return null;
+    { const pc = parseCR(it.tr); it.tr = pc.text; if (pc.runs.length) it.cr = pc.runs; } // 一部だけ色・見た目の違う訳
+    // 項目全体の見た目：太字・斜体・取り消し線・下線・行の傾き
+    if (a.bold === true) it.bd = 1;
+    if (a.italic === true) it.itl = 1;
+    if (a.strike === true) it.stk = 1;
+    if (a.underline === true) it.ul = 1;
+    { const an = Math.round(+a.angle || 0); if (Math.abs(an) >= 5 && Math.abs(an) <= 80) it.ang = an; }
+    // 原文の各行の位置（文字の並びで形を作っている文：縄・波など。訳も同じ形に並べる）
+    if (Array.isArray(r.lines) && r.lines.length >= 3 && r.kind !== 'speech') {
+      const bw = r.x1 - r.x0, bh = r.y1 - r.y0, q = (v) => Math.round(v * 1000) / 1000;
+      const sl = r.lines.slice().sort((p1, p2) => p1.y0 - p2.y0 || p1.x0 - p2.x0);
+      it.lb = sl.map((l) => { const o = { x: q((l.x0 - r.x0) / bw), y: q((l.y0 - r.y0) / bh), w: q((l.x1 - l.x0) / bw), h: q((l.y1 - l.y0) / bh) }; const c = inkColor(st, l); if (c) o.c = c; return o; });
+      const prof = lineProfiles(st, sl);
+      if (prof) { it.pal = prof.pal; it.lp = prof.lp; }
+    }
     if (r.ar) {
       // 文字を含まない・大きすぎる範囲は信用しない
       const ar = { x: r.ar.x0, w: r.ar.x1 - r.ar.x0, y: (r.ar.y0 - span.vy) / H, h: (r.ar.y1 - r.ar.y0) / H };
@@ -4372,7 +4876,8 @@ ${w.story || '（なし）'}
 .ezc-layer{position:absolute!important;left:0!important;top:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483000!important;pointer-events:none!important;margin:0!important;padding:0!important;border:0!important;transform:none!important;}
 .ezc-ov{position:absolute!important;left:0;top:0;pointer-events:none!important;z-index:10;container-type:inline-size;margin:0!important;padding:0!important;border:0!important;background:none!important;}
 .ezc-off .ezc-ov{display:none!important}
-.ezc-b{position:absolute;box-sizing:border-box;display:flex;align-items:center;justify-content:center;text-align:center;pointer-events:auto;cursor:pointer;
+.ezc-t{display:block;max-width:100%}
+.ezc-b{position:absolute;box-sizing:border-box;display:flex;align-items:center;justify-content:center;text-align:center;pointer-events:none;
 font-family:"Hiragino Sans","Noto Sans CJK JP","Noto Sans JP","Yu Gothic",system-ui,sans-serif;font-weight:700;line-height:1.22;letter-spacing:0;
 line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-wrap;padding:.25em .35em;transition:opacity .15s;-webkit-tap-highlight-color:transparent;text-shadow:none;}
 .ezc-b.ezc-sp.ezc-fm{font-family:"ezc-kana","Hiragino Sans","Noto Sans CJK JP","Noto Sans JP","Yu Gothic",system-ui,sans-serif}
@@ -4395,13 +4900,17 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   function placeOverlay(img, ov) {
     if (!img.isConnected) { ov.remove(); overlays.delete(img); return; }
     if (ov.style.display) ov.style.display = '';
+    if (!ov.isConnected) getLayer().appendChild(ov); // サイトが訳の層を消したときは付け直す
     // 位置は層（ページ左上）からの差で決める。変わっていなければ書き込まない（スクロール中のカクつき防止）
-    const ir = img.getBoundingClientRect(), lr = (ov.parentNode || getLayer()).getBoundingClientRect();
+    const ir = rectOf(img), lr = (ov.parentNode || getLayer()).getBoundingClientRect();
     const st = ov.style, L = (ir.left - lr.left) + 'px', T = (ir.top - lr.top) + 'px', W = ir.width + 'px', H = ir.height + 'px';
     if (st.left !== L) st.left = L;
     if (st.top !== T) st.top = T;
     if (st.width !== W) st.width = W;
     if (st.height !== H) st.height = H;
+    // iframeの中の画像：枠の外にはみ出した訳は見せない（サイトの上のバーなどに重ならないように）
+    const cp = ir.clip ? `polygon(${ir.clip.left - ir.left}px ${ir.clip.top - ir.top}px, ${ir.clip.right - ir.left}px ${ir.clip.top - ir.top}px, ${ir.clip.right - ir.left}px ${ir.clip.bottom - ir.top}px, ${ir.clip.left - ir.left}px ${ir.clip.bottom - ir.top}px)` : '';
+    if (st.clipPath !== cp) st.clipPath = cp;
     // 大きさが変わったら（読み込み中の仮の高さ→本当の高さ など）文字サイズを測り直す
     const fw = +ov.dataset.fw || 0, fh = +ov.dataset.fh || 0;
     if (ir.width > 0 && ir.height > 0 && (ov.dataset.fitted !== '1' || Math.abs(ir.width - fw) > 2 || Math.abs(ir.height - fh) > 2)) fitAll(ov);
@@ -4588,15 +5097,34 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
         color: it.fg,
         textShadow: outlineFor(it),
       });
+      if (it.lb && !b.classList.contains('ezc-v') && /^(ja|zh)/.test(langTag())) {
+        // 行の形を写すときは、原文の文字の範囲にぴったり重ねる
+        Object.assign(b.style, { left: it.x * 100 + '%', top: it.y * 100 + '%', width: it.w * 100 + '%', height: it.h * 100 + '%' });
+        b.dataset.lb = JSON.stringify(it.lb);
+        if (it.lp && it.pal) b.dataset.lp = JSON.stringify({ pal: it.pal, lp: it.lp });
+        if (!it.stroke) b.style.textShadow = 'none'; // 原文にフチがなければ、形を写す文にはフチを付けない（太く汚く見えるため）
+      }
+      b.dataset.fx = (it.bd ? 'b' : '') + (it.itl ? 'i' : '') + (it.stk ? 's' : '') + (it.ul ? 'u' : '');
+      // 斜めに置かれた文：箱の中に収まる長さで、同じ角度に傾けて置く
+      if (it.ang && !b.dataset.lb) {
+        const th = (it.ang * Math.PI) / 180, cs = Math.abs(Math.cos(th)), sn = Math.abs(Math.sin(th));
+        const Wb = it.w, Hb = it.h * imgRatio, det = cs * cs - sn * sn; // 幅の単位にそろえる
+        let w2 = 0, h2 = 0;
+        if (Math.abs(det) > 0.25) { w2 = (Wb * cs - Hb * sn) / det; h2 = (Hb * cs - Wb * sn) / det; }
+        if (!(w2 > 0 && h2 > 0)) { w2 = Math.hypot(Wb, Hb) * 0.85; h2 = Math.min(Wb, Hb) * 0.45; }
+        const cx = it.x + it.w / 2, cy = it.y + it.h / 2;
+        Object.assign(b.style, { left: (cx - w2 / 2) * 100 + '%', top: (cy - h2 / imgRatio / 2) * 100 + '%', width: w2 * 100 + '%', height: (h2 / imgRatio) * 100 + '%', transform: `rotate(${it.ang}deg)` });
+        b.classList.remove('ezc-v');
+      }
       if (it.patch || it.cimg) b.dataset.free = '1';
       if (it.crect && S.artMode === 'label') { b.style.color = '#1a1a1a'; b.style.textShadow = 'none'; }
-      b.textContent = it.tr;
       b.dataset.tr = it.tr;
+      b.dataset.cr = it.cr ? JSON.stringify(it.cr) : '';
+      paintRuns(b, null);
       b.dataset.src = it.src || '';
       // 原文の文字の範囲（文字サイズの目安用）。古い保存は吹き出し全体なので、文字はその6割くらいとみなす
       b.dataset.tw = it.w * (it.old ? 0.75 : 1); b.dataset.th = it.h * (it.old ? 0.75 : 1);
-      b.title = 'タップで原文を表示';
-      b.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); b.classList.toggle('ezc-peek'); c.classList.toggle('ezc-peek'); });
+      // 訳をタップしても何もしない（原文に戻すのはボタンだけ。読んでいる途中で勝手に戻らないように）
       ov.appendChild(b);
     }
     ov.dataset.fitted = '0';
@@ -4610,6 +5138,114 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   const OPEN = /[「『（(【〈《"“‘]$/;
   const HIRA = /^[ぁ-ゟ]+$/;
   const SENT_END = /[。！？!?]$|…$|」$|』$/;
+
+  // 訳の中の ⟦#RRGGBB|…⟧（原文で色が違った部分）を取り出す → 文字と、色の範囲 [始まり, 終わり, 色]
+  function parseCR(tr) {
+    const runs = [];
+    let text = '';
+    const re = /⟦([^|｜⟦⟧]{0,40})[|｜]([\s\S]*?)⟧/g;
+    let last = 0, m;
+    while ((m = re.exec(String(tr || '')))) {
+      text += tr.slice(last, m.index);
+      const st = text.length;
+      text += m[2];
+      // 印：色 #RRGGBB と、b 太字・i 斜体・s 取り消し線・u 下線
+      let col = '', fl = '';
+      for (const t of m[1].split(/[,、\s]+/)) {
+        if (/^#[0-9a-fA-F]{6}$/.test(t)) col = t.toLowerCase();
+        else if (/^(b|bold)$/i.test(t)) fl += 'b';
+        else if (/^(i|italic)$/i.test(t)) fl += 'i';
+        else if (/^(s|strike)$/i.test(t)) fl += 's';
+        else if (/^(u|underline)$/i.test(t)) fl += 'u';
+      }
+      if (m[2] && (col || fl)) runs.push(fl ? [st, text.length, col, fl] : [st, text.length, col]);
+      last = re.lastIndex;
+    }
+    text += String(tr || '').slice(last);
+    return { text: text.replace(/[⟦⟧]/g, ''), runs };
+  }
+  // 色の範囲どおりに文字を並べる（lines：改行した各行。なければそのまま）
+  function paintRuns(b, lines, boxes) {
+    let runs = [];
+    try { runs = JSON.parse(b.dataset.cr || '[]'); } catch (e) { runs = []; }
+    const plain = b.dataset.tr || '';
+    const fx = b.dataset.fx || ''; // 項目全体の見た目（b 太字・i 斜体・s 取り消し線・u 下線）
+    const colOf = (i) => { for (const r of runs) if (i >= r[0] && i < r[1]) return (r[2] || '') + '|' + (r[3] || ''); return '|'; };
+    const styleOf = (key) => {
+      const [col, fl0] = String(key || '|').split('|'), fl = fx + (fl0 || '');
+      const st = [];
+      if (col) st.push('color:' + col);
+      if (fl.includes('b')) st.push('font-weight:900');
+      if (fl.includes('i')) st.push('font-style:italic');
+      const dl = [fl.includes('s') ? 'line-through' : '', fl.includes('u') ? 'underline' : ''].filter(Boolean).join(' ');
+      if (dl) st.push('text-decoration:' + dl + ';text-decoration-thickness:.08em');
+      return st.join(';');
+    };
+    b.textContent = '';
+    // 中身は1つの入れ物にまとめる（枠は横並びで中身を置く作りなので、色ごとの部品がばらばらに横に並ばないように）
+    const box = document.createElement('span');
+    box.className = 'ezc-t';
+    b.appendChild(box);
+    // 行の形を写すとき：各行を原文の行の場所に置き、行の幅いっぱいに字を並べる
+    if (boxes) box.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;max-width:none';
+    let p = 0;
+    (lines || [plain]).forEach((ln, li) => {
+      let dst = box;
+      if (boxes) {
+        const bx = boxes[li], d = document.createElement('div');
+        // 字が行の幅の8割以上を埋めるなら両端までそろえる。足りないときは真ん中に寄せる（字の間が空きすぎて読みにくくならないように）
+        d.style.cssText = `position:absolute;left:${bx.x * 100}%;top:${bx.y * 100}%;width:${bx.w * 100}%;height:${bx.h * 100}%;display:flex;align-items:center;justify-content:center;line-height:1`;
+        d.dataset.n = [...ln].length;
+        box.appendChild(d);
+        dst = d;
+      } else if (li) box.appendChild(document.createElement('br'));
+      let cur = '|', buf = '';
+      const flush = () => {
+        if (!buf) return;
+        const css = styleOf(cur);
+        if (boxes) { for (const ch of buf) { const sp = document.createElement('span'); if (css) sp.style.cssText = css; sp.textContent = ch; dst.appendChild(sp); } buf = ''; return; } // 1字ずつ均等に並べる
+        if (css) { const sp = document.createElement('span'); sp.style.cssText = css; sp.textContent = buf; dst.appendChild(sp); }
+        else dst.appendChild(document.createTextNode(buf));
+        buf = '';
+      };
+      for (const ch of ln) {
+        // 行の文字が、元の訳のどこにあたるか（改行・前後の空白は組み直しで消えている）
+        let q = p; while (q < plain.length && plain[q] !== ch) q++;
+        const key = q < plain.length ? colOf(q) : '|';
+        if (q < plain.length) p = q + 1;
+        if (key !== cur) { flush(); cur = key; }
+        buf += ch;
+      }
+      flush();
+    });
+  }
+
+  // 改行を組み直した訳（tr）を、色の違う長い部分の前後で区切る（短い強調は区切らない）
+  function colorSegments(b, tr) {
+    let runs = [];
+    try { runs = JSON.parse(b.dataset.cr || '[]'); } catch (e) { runs = []; }
+    if (!runs.length) return [tr];
+    const plain = b.dataset.tr || '';
+    // 元の訳の位置 → 組み直した訳の位置
+    const keep = new Array(plain.length).fill(true);
+    plain.replace(/\s*\n\s*/g, (m, off) => { for (let i = off; i < off + m.length; i++) keep[i] = false; return m; });
+    let a = 0; while (a < plain.length && /\s/.test(plain[a])) keep[a++] = false;
+    let z = plain.length - 1; while (z >= 0 && /\s/.test(plain[z])) keep[z--] = false;
+    const pos = []; let k = 0;
+    for (let i = 0; i <= plain.length; i++) { pos[i] = k; if (i < plain.length && keep[i]) k++; }
+    const cuts = new Set();
+    for (const [s0, e0, col] of runs) {
+      if (!col || [...plain.slice(s0, e0).replace(/\s/g, '')].length < 6) continue;
+      const ps = pos[s0], pe = pos[e0];
+      if (ps > 0 && ps < tr.length) cuts.add(ps);
+      if (pe > 0 && pe < tr.length) cuts.add(pe);
+    }
+    if (!cuts.size) return [tr];
+    const at = [0, ...[...cuts].sort((x, y) => x - y), tr.length];
+    const out = [];
+    for (let i = 1; i < at.length; i++) { const sg = tr.slice(at[i - 1], at[i]).trim(); if (sg) out.push(sg); }
+    return out.length ? out : [tr];
+  }
 
   function phraseUnits(text) {
     let raw;
@@ -4673,13 +5309,92 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     return Math.sqrt(area / n) / 1.2 * 1.1; // 原文の文字の範囲÷字数＝1字ぶん（行間込み）
   }
 
+  // 原文の行の形どおりに並べる：行の数・位置・長さを原文と同じにして、訳を行の長さに合わせて分ける
+  function layoutShape(b, tr, minSize) {
+    let lb;
+    try { lb = JSON.parse(b.dataset.lb || 'null'); } catch (e) { return false; }
+    if (!Array.isArray(lb) || lb.length < 3) return false;
+    const W = b.clientWidth, H = b.clientHeight;
+    if (!W || !H || [...tr].length < lb.length) return false;
+    // 色の違う部分（最後だけ赤字など）は、原文と同じく自分の行に置く
+    const segs = colorSegments(b, tr);
+    let plan = [{ text: tr, boxes: lb }];
+    // 原文の行の字の色が分かっていれば、色の違う部分はその色の行に置く
+    let runs = []; try { runs = JSON.parse(b.dataset.cr || '[]'); } catch (e) { runs = []; }
+    const hex = (h) => [1, 3, 5].map((i) => parseInt(h.substr(i, 2), 16));
+    const near = (a, c) => { const x = hex(a), y = hex(c); return Math.abs(x[0] - y[0]) + Math.abs(x[1] - y[1]) + Math.abs(x[2] - y[2]) < 170; };
+    runs = runs.filter((r) => r[2]);
+    const lineCol = lb.map((bx) => (bx.c && runs.some((r) => near(bx.c, r[2])) ? 'c' : 'b'));
+    const segCol = segs.map((sg) => { const i = tr.indexOf(sg); const plainI = (b.dataset.tr || '').indexOf(sg.slice(0, 4)); return runs.some((r) => plainI >= r[0] - 1 && plainI < r[1]) ? 'c' : 'b'; });
+    let byColor = null;
+    if (segs.length > 1 && lineCol.includes('c') && lineCol.includes('b')) {
+      // 行を色ごとのまとまりに分けて、同じ並び・同じ色の部分を当てる
+      const groups = [];
+      lineCol.forEach((t, i) => { if (groups.length && groups[groups.length - 1].t === t) groups[groups.length - 1].boxes.push(lb[i]); else groups.push({ t, boxes: [lb[i]] }); });
+      if (groups.length === segs.length && groups.every((g, i) => g.t === segCol[i])) byColor = segs.map((sg, i) => ({ text: sg, boxes: groups[i].boxes }));
+    }
+    if (byColor) plan = byColor;
+    else if (segs.length > 1 && segs.length <= lb.length) {
+      const lens = segs.map((x) => [...x].length), tot = lens.reduce((x, y) => x + y, 0) || 1;
+      const alloc = lens.map((l) => Math.max(1, Math.round((l / tot) * lb.length)));
+      while (alloc.reduce((x, y) => x + y, 0) > lb.length) { const i = alloc.indexOf(Math.max(...alloc)); alloc[i]--; }
+      while (alloc.reduce((x, y) => x + y, 0) < lb.length) { const i = alloc.indexOf(Math.max(...alloc)); alloc[i]++; }
+      let k = 0;
+      plan = segs.map((x, i) => { const bx = lb.slice(k, k + alloc[i]); k += alloc[i]; return { text: x, boxes: bx }; });
+    }
+    const lines = [], boxes = [];
+    for (const pl of plan) {
+      const cs = [...pl.text], tw = pl.boxes.reduce((x, y) => x + y.w, 0) || 1;
+      let used = 0, acc = 0;
+      pl.boxes.forEach((bx, i) => {
+        acc += bx.w;
+        let e = i === pl.boxes.length - 1 ? cs.length : Math.max(used, Math.round((cs.length * acc) / tw));
+        while (e < cs.length && e > used && /[、。，．,.!！?？…‥ー」』）)】〉》]/.test(cs[e])) e++; // 句読点で行を始めない
+        const ln = cs.slice(used, e).join('');
+        used = e;
+        if (ln) { lines.push(ln); boxes.push(bx); }
+      });
+    }
+    if (!lines.length) return false;
+    // どの行も原文の行の幅に収まる大きさ（全部の行で同じ大きさ）
+    let size = Infinity;
+    lines.forEach((ln, i) => { size = Math.min(size, (boxes[i].w * W) / Math.max(1, [...ln].length), boxes[i].h * H * 0.95); });
+    if (!isFinite(size) || size < 5) return false;
+    if (minSize && size * (S.textScale || 100) / 100 < minSize) return false; // 形どおりだと小さすぎて読みにくい
+    paintRuns(b, lines, boxes);
+    // 字が行の幅をほぼ埋める行だけ、両端までそろえる
+    { const box = b.querySelector('.ezc-t'); [...(box ? box.children : [])].forEach((div, li) => { const n = +div.dataset.n || 1; if (n > 1 && n * size >= boxes[li].w * W * 0.8) div.style.justifyContent = 'space-between'; }); }
+    // 原文の行の同じ場所の色で塗る（灰色の文の中の黒い字で縄を描いている、などの絵をそのまま写す）
+    let prof = null;
+    try { prof = JSON.parse(b.dataset.lp || 'null'); } catch (e) { prof = null; }
+    if (prof && Array.isArray(prof.lp) && prof.pal) {
+      const box = b.querySelector('.ezc-t');
+      [...(box ? box.children : [])].forEach((div, li) => {
+        const bi = lb.indexOf(boxes[li]);
+        const row = prof.lp[bi];
+        if (!row) return;
+        const sp = [...div.children], n = sp.length;
+        sp.forEach((el, i) => {
+          const c = Math.min(row.length - 1, Math.floor(((i + 0.5) / n) * row.length));
+          let ch = row[c];
+          // 字のない所（字と字の間）は、近くの字の色
+          for (let d = 1; ch === '-' && d < row.length; d++) ch = row[c - d] && row[c - d] !== '-' ? row[c - d] : row[c + d] && row[c + d] !== '-' ? row[c + d] : '-';
+          if (ch !== '-' && prof.pal[+ch]) el.style.color = prof.pal[+ch];
+        });
+      });
+    }
+    b.style.whiteSpace = 'nowrap';
+    b.style.fontSize = (size * (S.textScale || 100) / 100).toFixed(2) + 'px';
+    return true;
+  }
+
   function layoutCJK(b, ow) {
     const tr = (b.dataset.tr || '').replace(/\s*\n\s*/g, '').trim(); // モデルの改行は捨てて、こっちで組み直す
     const vertical = b.classList.contains('ezc-v');
     const cs = getComputedStyle(b);
     const font = `${cs.fontWeight} 100px ${cs.fontFamily}`;
     const units = phraseUnits(tr);
-    if (!units.length) return;
+    if (!units.length) { if (b.dataset.lb) layoutShape(b, tr, 0); return; }
     const widths = units.map((u) => (vertical ? [...u].length : textW(u, font)));
     const sentEnds = units.map((u) => SENT_END.test(u));
     const W = b.clientWidth, H = b.clientHeight;
@@ -4696,11 +5411,34 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       // 同じくらいの大きさなら、行の長さがそろっている方・行が少ない方を選ぶ
       if (!best || size > best.size * 1.04) best = { size, lines: r.lines };
     }
-    if (!best) return;
+    // 色の違う長い部分（最後の行だけ赤字など）は、原文と同じように自分の行から始める
+    const segs = colorSegments(b, tr);
+    if (segs.length > 1) {
+      const padAlong = vertical ? 0.5 : 0.7, padAcross = vertical ? 0.7 : 0.5;
+      const parts = segs.map((sg) => { const u = phraseUnits(sg); return { u, w: u.map((x) => (vertical ? [...x].length : textW(x, font))), e: u.map((x) => SENT_END.test(x)) }; });
+      const tryAt = (sz) => {
+        const lim = along / sz - padAlong;
+        const lines = [];
+        for (const pt of parts) {
+          let got = null;
+          for (let n = 1; n <= pt.u.length; n++) { const r = bestLines(pt.u, pt.w, n, pt.e); if (r && r.maxW <= lim) { got = r.lines; break; } }
+          if (!got) return null;
+          lines.push(...got);
+        }
+        return lines.length * lh + padAcross <= across / sz ? lines : null;
+      };
+      let lo = 4, hi = Math.max(8, Math.min(along, across)), seg = null;
+      for (let i = 0; i < 18; i++) { const mid = (lo + hi) / 2, r = tryAt(mid); if (r) { lo = mid; seg = r; } else hi = mid; }
+      if (seg) best = { size: lo, lines: seg };
+    }
+    if (!best) { if (b.dataset.lb) layoutShape(b, tr, 0); return; }
     const fill = b.dataset.free ? 0.92 : 0.86; // 吹き出しの中は少し余白を残す
-    const size = Math.max(6, Math.min(best.size * fill, ow * 0.075, origSize(b)) * (S.textScale || 100) / 100);
-    b.textContent = '';
-    best.lines.forEach((ln, i) => { if (i) b.appendChild(document.createElement('br')); b.appendChild(document.createTextNode(ln)); });
+    // 絵の上に大きく書かれた文字（枠なし）は、原文と同じくらい大きく出す。吹き出しの中は控えめに
+    const cap = ow * (b.dataset.free ? 0.14 : 0.075);
+    const size = Math.max(6, Math.min(best.size * fill, cap, origSize(b)) * (S.textScale || 100) / 100);
+    // 原文の行の形どおりに並べられるなら、そうする。ただし字がふつうの並べ方の7割より小さくなるときは読みやすさを優先
+    if (b.dataset.lb && layoutShape(b, tr, size * 0.7)) return;
+    paintRuns(b, best.lines);
     b.style.whiteSpace = 'nowrap';
     b.style.fontSize = size.toFixed(2) + 'px';
   }
@@ -4712,7 +5450,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     ov.dataset.fw = ow; ov.dataset.fh = oh;
     const cjk = /^(ja|zh)/.test(langTag());
     ov.querySelectorAll('.ezc-b').forEach((b) => {
-      if (cjk) { try { layoutCJK(b, ow); return; } catch (e) { b.textContent = b.dataset.tr || ''; b.style.whiteSpace = ''; } }
+      if (cjk) { try { layoutCJK(b, ow); return; } catch (e) { paintRuns(b, null); b.style.whiteSpace = ''; } }
       // 中央寄せのままだと上（縦書きは左）にはみ出した分が測れず、大きすぎても「収まった」と判定してしまう。
       // 測る間だけ端寄せにする
       b.style.overflow = 'hidden';
@@ -4748,7 +5486,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       const vh = innerHeight;
       overlays.forEach((ov, img) => {
         if (!img.isConnected) { ov.remove(); overlays.delete(img); return; }
-        const r = img.getBoundingClientRect();
+        const r = rectOf(img);
         const near = r.bottom > -vh && r.top < vh * 2 && r.width > 0;
         if (near) placeOverlay(img, ov);
         else ov.style.display = 'none';
@@ -4758,7 +5496,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   addEventListener('scroll', replaceVisible, { passive: true, capture: true });
   addEventListener('resize', replaceVisible);
   // 上の画像の読み込みなどでページの位置がずれたときにも追いかける
-  setInterval(replaceVisible, 600);
+  setInterval(() => { if (!document.hidden) replaceVisible(); }, 1200); // 軽くするため間隔をあける・裏の画面では動かさない
 
   /* ---------------- 翻訳キュー ---------------- */
   const queue = [];
@@ -4772,7 +5510,10 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     if (!img.complete || !img.naturalWidth) return false;
     if (img.naturalWidth < S.minSize || img.naturalHeight < S.minSize) return false;
     const r = img.getBoundingClientRect();
-    return r.width >= 150 && r.height >= 100;
+    if (r.width < 150 || r.height < 100) return false;
+    // 小説モードの挿絵：本文の幅いっぱいくらいの大きな絵だけ（表紙の小さな絵・広告のリンク画像は訳さない）
+    if (illustMode() && (r.width < Math.min(300, innerWidth * 0.6) || img.closest('a'))) return false;
+    return true;
   }
 
   function enqueue(img, force) {
@@ -4828,6 +5569,36 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     }
     lastItems.set(img, mine);
     render(img, mine);
+    // 小説モードの挿絵：コピー・保存に入れられるように、小説側の記録に渡す
+    if (illustMode()) {
+      try {
+        const blk = illustBlock(img), sig = blk ? (img.currentSrc || img.src) + '|' + blk.text : '';
+        if (blk && illustSig.get(img) !== sig) { illustSig.set(img, sig); onIllustShown(img, blk, imgDh.get(img) || ''); } // 同じ挿絵の描き直しでは記録し直さない（重いため）
+      } catch (e) { /* 記録なし */ }
+    }
+  }
+  // 挿絵の訳を、読む順（上から・左から）の文字と、色付きのHTMLにする
+  function illustBlock(img) {
+    const items = (lastItems.get(img) || allItems.get(img) || []).filter((it) => it && it.tr && it.kind !== 'sfx').slice().sort((a, b) => a.y - b.y || a.x - b.x);
+    if (!items.length) return null;
+    const esc = (t) => String(t).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
+    const html = items.map((it) => {
+      const t = it.tr, runs = it.cr || [];
+      let h = '', i = 0;
+      for (const [s0, e0, col, fl = ''] of runs) {
+        if (s0 > i) h += esc(t.slice(i, s0));
+        const st = [col ? 'color:' + col : '', fl.includes('b') ? 'font-weight:900' : '', fl.includes('i') ? 'font-style:italic' : '',
+          /[su]/.test(fl) ? 'text-decoration:' + [fl.includes('s') ? 'line-through' : '', fl.includes('u') ? 'underline' : ''].filter(Boolean).join(' ') : ''].filter(Boolean).join(';');
+        h += `<span style="${st}">${esc(t.slice(s0, e0))}</span>`; i = e0;
+      }
+      h += esc(t.slice(i));
+      // 原文の文字色。白っぽい字（暗い絵の上の字）は白い紙の上では読めないので色なしにする
+      let fg = /^#[0-9a-f]{6}$/i.test(it.fgHex || '') ? it.fgHex : '';
+      if (fg) { const n = parseInt(fg.slice(1), 16); if (0.299 * (n >> 16) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255) > 190) fg = ''; }
+      const ist = [it.bd ? 'font-weight:900' : '', it.itl ? 'font-style:italic' : '', it.stk || it.ul ? 'text-decoration:' + [it.stk ? 'line-through' : '', it.ul ? 'underline' : ''].filter(Boolean).join(' ') : ''].filter(Boolean).map((x) => ';' + x).join('');
+      return `<p style="margin:0 0 .4em;text-align:center${fg ? ';color:' + fg : ''}${ist}">${h.replace(/\n/g, '<br>')}</p>`;
+    }).join('');
+    return { text: items.map((it) => it.tr).join('\n'), html };
   }
 
   const forced = new WeakSet();
@@ -4867,8 +5638,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       if (!ok) {
         const im = itemsMatch(v, d); // 文字の部分を細かく比べる（いちばん確か）
         const tm = thumbMatch(thumbGet(k), d.th); // 画像全体をざっくり比べる
-        if (im === false || tm === false) { r.why.push(name + '✕'); continue; }
-        ok = im === true || tm === true || (tm === null && mode === 'loose');
+        // クラウドから戻した記録（この端末に縮小画像がない）を「同じ話・同じ位置・同じ大きさ」で見つけたとき：
+        // 別のブラウザでは細かい比べ方が少しずれるので、指紋がかなり違うときだけ別の画像とみなす
+        if (name === '位置' && tm === null && posDist <= 14 && !(im === false && posDist > 8)) { r.hit = null; ok = true; }
+        else if (im === false || tm === false) { r.why.push(name + '✕'); continue; }
+        else if (name === '位置' && posDist > 6 && im !== true && tm !== true) { r.why.push(name + '?'); continue; } // この端末の記録なら前と同じ厳しさ
+        ok = ok || im === true || tm === true || (tm === null && mode === 'loose');
         if (!ok) { r.why.push(name + '?'); continue; }
       }
       // 0件の保存は、v2.4より前だと「返事を止められた」失敗の可能性がある。確かめた印がなければ訳し直す
@@ -4897,9 +5672,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       if (msg !== tallyShown && (tally.hit || tally.fresh)) { tallyShown = msg; toast(msg); }
     }, 1500);
   }
+  const imgDh = new WeakMap(); // 画像 → 見た目の指紋（挿絵の訳を保存用に見分ける）
+  const illustSig = new WeakMap(); // 画像 → 最後に記録した挿絵の訳
   function finishHit(r) {
     tally.hit++; tallyUpdate();
     const { img, d, key, ik, uk, hit, hitKey, src } = r;
+    if (d && d.dh) imgDh.set(img, d.dh);
     img.dataset.ezcHow = '保存(' + r.how + ')';
     hIndexPut(d, key);
     thumbPut(key, d);
@@ -4949,12 +5727,14 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     tally.why[w0] = (tally.why[w0] || 0) + 1;
     tallyUpdate();
     const { img, d, key, ik, uk, src } = r;
+    if (d && d.dh) imgDh.set(img, d.dh);
     doneSrc.set(img, src);
+    if (key) store.saved++; else store.noKey++; // 指紋が取れない画像は保存できない（診断で分かるように数える）
     cachePut(key, forSave(items));
     if (key) { if (!items.length) store.set('ezc_e:' + key, 1); else del('ezc_e:' + key); } // 本当に文字がなかった印
     hIndexPut(d, key);
     thumbPut(key, d);
-    img.dataset.ezcHow = '新規翻訳（' + r.why.join('・') + '）';
+    img.dataset.ezcHow = '新規翻訳（' + r.why.join('・') + '）' + (key ? '' : '・保存できない画像');
     setAlias(uk, key, d.dh); setAlias(ik, key, d.dh);
     pageRemember(img, d, key);
     addLines(items);
@@ -5209,7 +5989,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
           for (const p of runs) {
             if (doneSrc.get(p) === (p.currentSrc || p.src) && !forced.has(p)) continue; // 表示まで済んだ画像はそのまま
             failedAt.set(p, Date.now()); // 失敗した画像は、スクロールのたびに自動で再挑戦しない（API代の節約）。タップで再試行
-            setBadge(p, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(p, null); failedAt.delete(p); activate(); enqueue(p, true); });
+            setBadge(p, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(p, null); failedAt.delete(p); retryOne(p); });
           }
           if (/APIキー/.test(e.message)) toast(e.message);
         } finally {
@@ -5242,7 +6022,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
           if (!pageActive() && !forced.has(img) && !S.debug) { waiting.add(img); waitSrc.set(img, img.currentSrc || img.src); }
           else {
             failedAt.set(img, Date.now());
-            setBadge(img, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(img, null); failedAt.delete(img); activate(); enqueue(img, true); });
+            setBadge(img, '失敗：' + (e.message || e) + '（タップで再試行）', () => { setBadge(img, null); failedAt.delete(img); retryOne(img); });
           }
         } finally {
           running--;
@@ -5259,7 +6039,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     for (const e of ents) {
       if (!e.isIntersecting || !eligible(e.target)) continue;
       // 翻訳中でないとき（保存した訳を出すだけ）は、画面の近くの画像だけ読む。先の画像まで読み込むとサイトの表示が遅くなるため
-      if (!pageActive() && e.boundingClientRect.top > innerHeight * 1.5) continue;
+      if (!pageActive() && rectOf(e.target).top > innerHeight * 1.5) continue;
       enqueue(e.target, pageForce && !forceDone.has(e.target));
     }
   }, { rootMargin: '0px 0px 2000px 0px' });
@@ -5280,7 +6060,16 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       if (isOn() && eligible(img)) { io.unobserve(img); io.observe(img); }
     });
   }
-  document.querySelectorAll('img').forEach(watch);
+  allImgs().forEach(watch);
+  // シャドウDOM・iframeの中に増えた画像は下の監視では気づけないので、ときどき見に行く
+  // 奥（iframe・シャドウDOM）が無いページでは、たまにだけ見る。画面が裏にあるときは見ない
+  let deepTick = 0;
+  setInterval(() => {
+    if (!isOn() || document.hidden) return;
+    deepTick++;
+    if (!deepCache.roots.length && deepTick % 6) return;
+    allImgs().forEach(watch);
+  }, 3000);
   new MutationObserver((muts) => {
     for (const m of muts) {
       m.addedNodes.forEach((n) => {
@@ -5294,18 +6083,30 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   // 確認モード：画面に見えている漫画が <img> か canvas かを知らせる（canvas だと読めない）
   function diagnose() {
     const vh = innerHeight;
-    const vis = (e) => { const r = e.getBoundingClientRect(); return r.bottom > 0 && r.top < vh && r.width > 150 && r.height > 100; };
-    const imgs = [...document.images].filter(vis);
+    const vis = (e) => { const r = rectOf(e); return r.bottom > 0 && r.top < vh && r.width > 150 && r.height > 100; };
+    const roots = [document, ...wtDeepRoots()];
+    const all = (sel) => roots.flatMap((r) => { try { return [...r.querySelectorAll(sel)]; } catch (e) { return []; } });
+    const imgs = allImgs().filter(vis);
+    const deep = imgs.filter((i) => i.ownerDocument !== document || i.getRootNode() !== document).length;
     const ok = imgs.filter((i) => eligible(i)).length;
-    const cvs = [...document.querySelectorAll('canvas')].filter(vis).length;
-    const bgs = [...document.querySelectorAll('div,section,figure')].filter((e) => vis(e) && /url\(/.test(getComputedStyle(e).backgroundImage)).length;
-    toast(`確認：画像${imgs.length}枚（対象${ok}）／canvas ${cvs}／背景画像 ${bgs}`);
+    const cvs = all('canvas').filter(vis).length;
+    const bgs = all('div,section,figure').filter((e) => vis(e) && /url\(/.test(getComputedStyle(e).backgroundImage)).length;
+    let ng = 0; for (const f of all('iframe')) { try { if (!f.contentDocument) ng++; } catch (e) { ng++; } }
+    toast(`確認：画像${imgs.length}枚（対象${ok}${deep ? '・奥' + deep : ''}）／canvas ${cvs}／背景画像 ${bgs}${ng ? '／読めないiframe ' + ng : ''}`);
+    setTimeout(() => toast(saveSummary()), 2800);
   }
 
+  // 保存の状態：全部で何枚分あるか・この話で何枚保存されているか・今回保存した枚数・失敗
+  function saveSummary() {
+    let all = 0, here = 0;
+    try { all = getIdx().length; } catch (e) { /* 数えられない */ }
+    try { here = Object.keys((store.get(pageKey(), null) || {}).idx || {}).length; } catch (e) { /* 数えられない */ }
+    return `保存：全部で${all}枚分／この話${here}枚／今回の新規${store.saved}枚${store.noKey ? `（保存できない画像${store.noKey}枚）` : ''}${store.fails ? `／保存失敗${store.fails}回（${store.lastErr}）` : ''}`;
+  }
   function translateVisibleNow() {
     const vh = innerHeight, reach = pageActive() ? 2 : 1.5;
-    document.querySelectorAll('img').forEach((img) => {
-      const r = img.getBoundingClientRect();
+    allImgs().forEach((img) => {
+      const r = rectOf(img);
       if (r.bottom > 0 && r.top < vh * reach && eligible(img)) enqueue(img);
     });
   }
@@ -5318,7 +6119,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   }, { passive: true });
 
   /* ---------------- ボタン・設定画面 ---------------- */
-  const isOn = () => !!GM_getValue(wtKey(), false); // WTモードのサイト
+  const illustMode = () => !GM_getValue(wtKey(), false) && illustOn(); // 小説モードで挿絵だけ訳す
+  const isOn = () => !!GM_getValue(wtKey(), false) || illustMode(); // WTモードのサイト（または小説の挿絵）
   // 翻訳（API）は、そのページでWTボタンを押してから。保存してある訳は押さなくても表示する
   let activePage = '';
   // 話の見分け：URLのパス＋話を表す項目だけ（NAVERは ?titleId=…&no=… で話が変わる。読む位置などの項目は無視）
@@ -5339,9 +6141,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   const showOrig = (v) => { origPage = v ? pid() : ''; document.documentElement.classList.toggle('ezc-off', !!v); };
   // 訳し直し・再試行など、手で頼んだ翻訳も「翻訳中」として扱う（ボタンが回り、押せば一時停止できる）
   function activate() { showOrig(false); activePage = pid(); }
+  // 失敗した画像だけやり直す（ページ全体の翻訳はオンにしない）
+  function retryOne(img) { showOrig(false); if (!pageActive()) { forceHold = false; redoing = true; } enqueue(img, true); }
   let redoing = false, forceHold = false; // 訳し直し中（ページ全体の翻訳はオンにしない）／止めたら訳し直しも一時停止
   const forceRun = (img) => forced.has(img) && !forceHold;
   function togglePage() {
+    try { navigator.vibrate && navigator.vibrate(12); } catch (e) { /* 振動なし */ }
     // 翻訳中に押したら：止めて原文に戻す（小説の「原」と同じ）
     if (pageActive() || (redoing && !forceHold)) { activePage = ''; pageForce = false; redoing = false; forceHold = true; showOrig(true); toast('原文に戻した'); updateButton(); return; }
     forceHold = false;
@@ -5354,11 +6159,29 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     translateVisibleNow();
     updateButton();
   }
-  function setOn(v) {
-    origPage = '';
-    if (!v) { activePage = ''; waiting.clear(); }
-    document.documentElement.classList.toggle('ezc-off', !v);
-    if (v) translateVisibleNow(); // 保存してある訳だけ表示（翻訳はボタンを押してから）
+  function setOn() {
+    // モードが変わったとき：翻訳は止めて、保存してある訳だけ表示（翻訳はボタン／小説の「訳」を押してから）
+    origPage = ''; activePage = ''; waiting.clear(); redoing = false; pageForce = false;
+    const on = isOn();
+    document.documentElement.classList.toggle('ezc-off', !on);
+    if (on) translateVisibleNow();
+    updateButton();
+  }
+  // 小説モードの挿絵：小説の「訳」で翻訳開始、「原」で原文に戻す
+  function illust(v) {
+    if (!illustMode()) return;
+    if (v) {
+      if (!keyOf()) return;
+      forceHold = false;
+      if (origPage) showOrig(false);
+      activate();
+      const list = [...waiting].filter((img) => img.isConnected); waiting.clear();
+      list.forEach((img) => enqueue(img));
+      translateVisibleNow();
+    } else {
+      if (!pageActive() && !redoing) return;
+      activePage = ''; pageForce = false; redoing = false; forceHold = true; showOrig(true);
+    }
     updateButton();
   }
 
@@ -5471,9 +6294,9 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       if (wtSeenPage === id) return true;
       const vh = innerHeight, vw = innerWidth;
       let area = 0;
-      for (const img of document.images) {
+      for (const img of allImgs()) {
         if (!eligible(img)) continue;
-        const r = img.getBoundingClientRect();
+        const r = rectOf(img);
         const h = Math.max(0, Math.min(vh, r.bottom) - Math.max(0, r.top)), w = Math.max(0, Math.min(vw, r.right) - Math.max(0, r.left));
         area += h * w;
       }
@@ -5481,10 +6304,32 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       return false;
     },
     show: (v) => { host.style.display = v ? '' : 'none'; },
-    setOn: (v) => setOn(v),
+    setOn: () => setOn(),
+    illust: (v) => illust(v),
+    // 画面に出ている挿絵のうち、まだ訳を表示していない（または訳している最中の）枚数
+    visibleIllustKey: () => { const vh = innerHeight; return allImgs().filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && eligible(i); }).map((i) => imgIndex(i) + ':' + hash(String(i.currentSrc || i.src))).join(','); }, // アドレス全体で見分ける（末尾だけだと同じになることがある）
+    // 画面に出ている挿絵のうち、訳を表示しているもの
+    illustShownNow: () => { if (document.documentElement.classList.contains('ezc-off')) return 0; const vh = innerHeight; return allImgs().filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && (lastItems.get(i) || []).length; }).length; },
+    illustPending: () => { const vh = innerHeight; return allImgs().filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && eligible(i) && doneSrc.get(i) !== (i.currentSrc || i.src); }).length; },
+    illustFor: (img) => illustBlock(img),
+    visibleIllust: () => { const vh = innerHeight; return allImgs().filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && eligible(i); }).length; },
+    // 診断用：挿絵が訳されないときの手がかり
+    diag: () => {
+      const vh = innerHeight;
+      const imgs = allImgs(), deep = imgs.filter((i) => i.ownerDocument !== document || i.getRootNode() !== document).length;
+      const vis = imgs.filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && r.width > 0; });
+      const sized = vis.filter((i) => { const r = i.getBoundingClientRect(); return r.width >= 150 && r.height >= 100; });
+      const inLink = sized.filter((i) => i.closest('a')).length;
+      return [
+        `挿絵: ${illustMode() ? '小説モードで動作中' : isOn() ? 'WTモード' : '止まっている'}／小説の状態: ${novelOn ? '訳' : '原文'}／翻訳中: ${pageActive() ? 'はい' : 'いいえ'}`,
+        `挿絵の画像: 全部${imgs.length}枚（奥${deep}）・画面内${vis.length}・大きさOK ${sized.length}（リンクの中${inLink}）・対象${vis.filter((i) => eligible(i)).length}`,
+        `挿絵のキー: ${keyOf() ? 'Geminiあり' : 'Geminiなし（訳せません）'}`,
+        saveSummary(),
+      ];
+    },
     // 別の話に移ったら、原文表示を解除（保存してある訳はまた最初から出す）
     sync: () => {
-      if (syncPid !== pid()) { syncPid = pid(); pageForce = false; } // 別の話に移ったら「全部訳し直す」は終わり
+      if (syncPid !== pid()) { syncPid = pid(); pageForce = false; updateButton(); } // 別の話に移ったら「全部訳し直す」は終わり。ボタンの見た目も戻す
       if (origPage && origPage !== pid()) { showOrig(false); if (isOn()) translateVisibleNow(); }
     },
     // 設定画面（小説と同じ画面のWTタブ）との受け渡し：元の設定欄に値を入れて、元の処理をそのまま使う
@@ -5506,7 +6351,13 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     importText: (t) => importData(t),
     // 小説のボタンの「訳」の位置に重ねる
     // ⚙と同じ基準（画面の左上から）で置く。右下基準だと、スマホのアドレスバーの出し入れで画面の高さが変わったときにずれるため
-    placeAt: (r) => { fab.style.right = 'auto'; fab.style.bottom = 'auto'; fab.style.left = Math.round(r.left) + 'px'; fab.style.top = Math.round(r.top) + 'px'; },
+    placeAt: (r) => {
+      fab.style.right = 'auto'; fab.style.bottom = 'auto'; fab.style.left = Math.round(r.left) + 'px'; fab.style.top = Math.round(r.top) + 'px';
+      // 縮めて見ているページでは、小説のボタンと同じ大きさにする
+      let k = 1; try { k = ui.uiScale(); } catch (e) { k = 1; }
+      const sc = k > 1.05 ? String(k) : '';
+      if (fab.style.scale !== sc) { fab.style.scale = sc; fab.style.transformOrigin = '0 0'; const t = $('toast'); if (t) { t.style.scale = sc; t.style.transformOrigin = 'top center'; } }
+    },
   };
 
   const $ = (id) => root.getElementById(id);
@@ -5528,6 +6379,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     fab.classList.toggle('on', pageActive());
     const n = queue.length + running + scanWait.length + (scanBusy ? 1 : 0);
     if (!n) redoing = false;
+    // 小説モードの挿絵：小説の「訳/原」ボタンを回す
+    if (illustMode()) { try { ui.setIllustBusy(n > 0 && (pageActive() || redoing)); } catch (e) { /* ボタンなし */ } }
     fab.classList.toggle('busy', n > 0 && (pageActive() || (redoing && !forceHold))); // 翻訳中はボタンのまわりがくるくる回る
     $('n').hidden = n === 0 || !S.debug; // 残りの枚数は確認モードのときだけ
     $('n').textContent = n;
@@ -5608,7 +6461,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     $('imf').value = '';
   };
   $('redoAll').onclick = () => {
-    const imgs = [...document.images].filter((img) => eligible(img));
+    const imgs = allImgs().filter((img) => eligible(img));
     if (!confirm(`この話の画像を全部訳し直す？（今読み込まれている${imgs.length}枚＋この後読み込まれる分。API代がかかる）`)) return;
     $('sheet').hidden = true;
     showOrig(false); forceHold = false; redoing = true; pageForce = true;
@@ -5618,8 +6471,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     $('sheet').hidden = true;
     showOrig(false); forceHold = false; redoing = true;
     const vh = innerHeight;
-    document.querySelectorAll('img').forEach((img) => {
-      const r = img.getBoundingClientRect();
+    allImgs().forEach((img) => {
+      const r = rectOf(img);
       if (r.bottom > 0 && r.top < vh && eligible(img)) enqueue(img, true);
     });
   };
