@@ -18,11 +18,14 @@
 
 ## 1. 入れ方
 
-1. ブラウザに拡張機能の **Tampermonkey** を入れる
+1. ブラウザに拡張機能の **Tampermonkey** か **Violentmonkey** を入れる
    - **Android**：Firefox か Edge
-   - **iPhone / iPad**：Safari（App Storeの Tampermonkey・有料）
+   - **iPhone / iPad**：
+     - Safari ＋ App Storeの Tampermonkey（有料・500円ほど）
+     - または **Orion ブラウザ** ＋ Violentmonkey（無料）：Orionで [Violentmonkey のページ](https://addons.mozilla.org/firefox/addon/violentmonkey/) を開いて追加
    - **PC**：Chrome・Edge・Firefox
-2. 下のリンクを開いて「インストール」を押す
+   - 無料の **Violentmonkey** でも使えます（[Firefox用](https://addons.mozilla.org/firefox/addon/violentmonkey/)・AndroidのFirefoxも同じページから）
+2. 下のリンクを開いて「インストール」を押す（Tampermonkey・Violentmonkey どちらも同じリンク）
 
 👉 **[スクリプトをインストール](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.user.js)**
 
@@ -30,6 +33,7 @@
 
 ### うまく入らないとき
 - **インストール画面が出ずにコードが表示される** → Tampermonkeyの「ダッシュボード」→「ユーティリティ」→「URLからインストール」に、上のリンクのアドレスを貼る
+  （Violentmonkeyなら、アイコン →「⚙」→「＋」→「URLからインストール」）
 - **iPhone / iPadで動かない** → 「設定」→「アプリ」→「Safari」→「機能拡張」→「Tampermonkey」で「すべてのWebサイト」を「許可」にする
 - **PCのChrome / Edgeで動かない** → 拡張機能の管理画面で「デベロッパーモード」をオンにして、Tampermonkeyの「ユーザースクリプトを許可」をオンにする
 
@@ -81,6 +85,8 @@ WTの設定は、APIキーなどを空欄にしておけば小説と同じもの
 
 ### 小説モードとWTモード
 設定画面を **「小説」タブのまま閉じると小説モード**、**「WT」タブのまま閉じるとWTモード** になります（サイトごと）。
+
+小説モードでも、**挿絵の中の文字** は「訳」を押すと一緒に訳されます（「原」で原文に戻る）。一度訳した挿絵は、開き直しても料金なしで表示されます。いらなければ設定の「挿絵の中の文字も訳す」をオフにしてください。
 
 ### WTモード（漫画・ウェブトゥーン）
 右下が **⚙** と **WT** ボタンになります。
