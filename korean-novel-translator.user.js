@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.49
+// @version      10.5.51
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -13,6 +13,7 @@
 // @exclude      *://*.google.com/*
 // @exclude      *://console.anthropic.com/*
 // @exclude      *://aistudio.google.com/*
+// @contributionURL https://ofuse.me/ikasumi
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -2610,6 +2611,10 @@ ${body}</main></body></html>`;
       .modesw button { letter-spacing: .04em; }
       .cfg .modehint { margin-top: -6px; text-align: center; }
       .modesw button.on { background: var(--card); color: var(--ac); box-shadow: 0 1px 6px rgba(0,0,0,.12); }
+      .cfg .support { margin: 18px 0 4px; padding-top: 14px; border-top: 1px solid var(--line); text-align: center; }
+      .cfg .support a { display: inline-block; padding: 9px 18px; border-radius: 999px; background: #fdecef; color: #c2185b; font-weight: 700; text-decoration: none; }
+      @media (prefers-color-scheme: dark) { .cfg .support a { background: #3a1f2a; color: #ff8fb1; } }
+      .cfg .support small { display: block; margin-top: 6px; opacity: .65; font-size: 11.5px; }
       .cfg .sec { margin: 10px 0 -4px; padding-top: 14px; border-top: 1px solid var(--line); font-weight: 700; font-size: 12px; letter-spacing: .08em; color: var(--ac); }
       .fab { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; touch-action: none; }
       .fab.main { grid-column: 2; grid-row: 2; }
@@ -2738,6 +2743,10 @@ ${body}</main></body></html>`;
           <div class="row"><button data-a="wt-cs" class="primary">今すぐクラウドに保存</button><button data-a="wt-cl">クラウドから戻す</button></div>
           <div class="row"><button data-a="wt-clr">保存したWTの訳を全部消す</button></div>
           <input type="file" name="wt_imf" accept=".json,application/json" hidden>
+          </div>
+          <div class="support">
+            <a href="https://ofuse.me/ikasumi" target="_blank" rel="noopener">☕ 作者を応援する（OFUSE）</a>
+            <small>このスクリプトは無料です。気に入ったら応援してもらえるとうれしいです</small>
           </div>
         </div>
       </div>
