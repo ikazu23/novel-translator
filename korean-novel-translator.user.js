@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.53
+// @version      10.5.56
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4090,16 +4090,46 @@ ${w.story || '（なし）'}
       const blob = await (await pf(src)).blob();
       return loadDrawable(blob);
     }
-    return loadDrawable(await getImageBlob(img));
+    // ほかのサイトの画像：まず読み込んだデータを絵にしてみる。だめなら（ブラウザが読めない形式・サイトの保護など）別の取り方を順に試す
+    const errs = [];
+    try { return await loadDrawable(await getImageBlob(img)); } catch (e) { errs.push(e.message || String(e)); }
+    const d0 = drawableFromImg(img); // 同じドメイン・CORS許可の画像なら、表示中の絵をそのまま使える
+    if (d0) return d0;
+    try { // 画像形式をブラウザが確実に読めるものに指定して取り直す（AVIFなどを読めないブラウザ向け）
+      const r = await xhr({ method: 'GET', url: src, responseType: 'blob', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
+      if (r.status >= 200 && r.status < 300 && r.response && r.response.size) return await loadDrawable(r.response);
+    } catch (e) { errs.push(e.message || String(e)); }
+    try { // データを「文字」として受け取る昔ながらの方法（arraybuffer・blobに対応していない拡張・ブラウザ向け。iPhoneのOrionなど）
+      const r = await xhr({ method: 'GET', url: src, overrideMimeType: 'text/plain; charset=x-user-defined', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
+      if (r.status >= 200 && r.status < 300 && r.responseText) {
+        const m = /content-type:\s*([^\r\n;]+)/i.exec(r.responseHeaders || '');
+        return await loadDrawable(new Blob([binStrToBytes(r.responseText)], { type: m && /^image\//i.test(m[1]) ? m[1] : 'image/jpeg' }));
+      }
+    } catch (e) { errs.push(e.message || String(e)); }
+    try { // ページ側のfetch（サイトのログイン情報つき）
+      const pf = (typeof unsafeWindow !== 'undefined' && unsafeWindow.fetch) ? unsafeWindow.fetch.bind(unsafeWindow) : fetch;
+      const res = await pf(src, { credentials: 'include' });
+      if (res.ok) return await loadDrawable(await res.blob());
+    } catch (e) { errs.push(e.message || String(e)); }
+    try { // CORSつきで読み込み直す（許可しているサイトなら読める）
+      const im = new Image(); im.crossOrigin = 'anonymous';
+      await new Promise((r, j) => { im.onload = r; im.onerror = j; im.src = src; });
+      const d = drawableFromImg(im);
+      if (d) return d;
+    } catch (e) { /* 読めない */ }
+    throw new Error('画像を読み込めませんでした（' + (errs[0] || 'サイトの保護') + '）');
   }
 
   async function getImageBlob(img) {
     const src = img.currentSrc || img.src;
     try {
       const r = await xhr({ method: 'GET', url: src, responseType: 'arraybuffer', headers: { Referer: location.href } });
-      if (r.status >= 200 && r.status < 300 && r.response) {
+      if (r.status >= 200 && r.status < 300 && r.response && (r.response.byteLength || r.response.size || r.response.length)) {
         const m = /content-type:\s*([^\r\n;]+)/i.exec(r.responseHeaders || '');
-        return new Blob([r.response], { type: m ? m[1] : 'image/jpeg' });
+        if (m && /text\/html|json/i.test(m[1])) throw new Error('画像ではなくページが返ってきた（' + r.status + '）'); // ログイン切れ・保護など
+        // 拡張によっては（iPhoneのOrionなど）、データが文字列で返ってくる。1文字=1バイトとして戻す
+        const body = typeof r.response === 'string' ? binStrToBytes(r.response) : r.response;
+        return new Blob([body], { type: m ? m[1] : 'image/jpeg' });
       }
     } catch (e) {}
     // 最後の手段: 表示中の画像から直接（同一オリジンかCORS許可時のみ）
@@ -4112,6 +4142,11 @@ ${w.story || '（なし）'}
     });
   }
 
+  function binStrToBytes(str) {
+    const u = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) u[i] = str.charCodeAt(i) & 0xff;
+    return u;
+  }
   async function loadDrawable(blob) {
     if (typeof createImageBitmap === 'function') {
       try { const b = await createImageBitmap(blob); return { src: b, w: b.width, h: b.height }; } catch (e) {}
@@ -4182,7 +4217,7 @@ ${w.story || '（なし）'}
   }
 
   // 回数制限：429が来たら全体で待つ。無料枠の「1分N回」を検知したら自動で間隔をあける
-  let pauseUntil = 0, minGap = 0, lastReq = 0, rpmNotified = false;
+  let pauseUntil = 0, minGap = 0, lastReq = 0, rpmNotified = false, freeSwitched = false;
   let gate = Promise.resolve();
   function waitTurn() {
     const p = gate.then(async () => {
@@ -4217,6 +4252,11 @@ ${w.story || '（なし）'}
     const safetySettings = ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
       .map((category) => ({ category, threshold: 'BLOCK_NONE' }));
     const models = S.models.split(',').map((s) => s.trim()).filter(Boolean);
+    // 最後の手段として、小説で使っているGeminiのモデルも試す（無料のキーだと、WTのモデルが使えないことがあるため）
+    let novelModel = '';
+    try { const c = cfg(); novelModel = ((c.models && c.models.gemini) || MODELS.gemini || '').trim(); } catch (e) { novelModel = ''; }
+    if (novelModel && !models.includes(novelModel)) models.push(novelModel);
+    const userCount = S.models.split(',').map((s) => s.trim()).filter(Boolean).length;
     // 考える時間を短くする（小説版と同じ）。文字の位置を出すのも、考えさせない方が速くて正確
     const thinkFor = (m) => (/gemini-2\.5-flash(?!-lite)/.test(m) ? { thinkingBudget: 0 } : /gemini-2\.5-pro/.test(m) ? { thinkingBudget: 128 }
       : /gemini-3/.test(m) ? { thinkingLevel: /pro/.test(m) ? 'low' : 'minimal' } : null);
@@ -4246,6 +4286,12 @@ ${w.story || '（なし）'}
             if (/RECITATION|SAFETY|PROHIBITED|BLOCKLIST|OTHER/.test(reason) && mi < models.length - 1) break; // ほかのモデルなら通るかも
             throw last;
           }
+          if (mi >= userCount && m === novelModel && !freeSwitched) { // 設定のモデルが使えず、小説のモデルで訳せた：次からはこのモデルを先に使う
+            freeSwitched = true;
+            S.models = [m].concat(models.slice(0, userCount)).join(', ');
+            saveS();
+            toast(`${models[0]} はこのキーでは使えないので、${m} で訳すね（設定も変えた）`);
+          }
           return text;
         }
         let msg = '';
@@ -4266,10 +4312,13 @@ ${w.story || '（なし）'}
           break;
         }
         if (r.status === 404 && mi < models.length - 1) break;
+        // このキーでは使えないモデル（有料のみ・権限なし）：ほかのモデルなら通るかも
+        if ((r.status === 403 || r.status === 400) && /billing|paid|free[ _]tier|not (available|supported)|permission|access/i.test(msg) && !/API key not valid|API_KEY_INVALID/i.test(msg) && mi < models.length - 1) break;
         if (r.status === 429) {
           // 1日の上限は待っても無駄なので次のモデルへ
           if (/per[_ ]?day|PerDay|requests_per_day/i.test(msg)) break;
           const lim = /free_tier_requests, limit: (\d+)/.exec(msg);
+          if (/limit: 0\b/.test(msg) || (lim && Number(lim[1]) === 0)) break; // 無料枠では使えないモデル（上限0回）：待っても無駄なので次のモデルへ
           if (lim) {
             minGap = Math.max(minGap, Math.ceil(60000 / Number(lim[1])) + 500);
             if (!rpmNotified) { rpmNotified = true; toast(`無料枠（1分${lim[1]}回）なので間隔をあけて訳すね`); }
