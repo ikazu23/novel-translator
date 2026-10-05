@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.63
+// @version      10.5.64
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2741,7 +2741,7 @@ ${body}</main></body></html>`;
           <label>クラウドに自動バックアップ（GitHubのトークン。空欄なら小説と同じ） <input name="wt_gt" type="password" autocomplete="off" placeholder="github_pat_… / ghp_…"></label>
           <label class="check"><input type="checkbox" name="wt_ab"> 訳が増えたら自動でクラウドへ保存</label>
           <div class="row"><button data-a="wt-cs" class="primary">今すぐクラウドに保存</button><button data-a="wt-cl">クラウドから戻す</button></div>
-          <div class="row"><button data-a="wt-clr">保存したWTの訳を全部消す</button></div>
+          <div class="row"><button data-a="wt-pclr">この話の保存した訳を消す</button><button data-a="wt-clr">保存したWTの訳を全部消す</button></div>
           <input type="file" name="wt_imf" accept=".json,application/json" hidden>
           </div>
           <div class="support">
@@ -3245,12 +3245,15 @@ ${body}</main></body></html>`;
     alert('並びをリセットしました。最初から「訳」を押しながら読み進めてください');
   });
   GM_registerMenuCommand('この話の訳の記録を消す（カカオの表示中翻訳）', () => {
-    if (!confirm('この話で訳した文の記録を消します。よろしいですか？')) return;
+    if (!confirm('この話で訳した文と挿絵の記録を消します。よろしいですか？')) return;
     GM_deleteValue(liveKey());
     liveData = null;
     ui.cardClose();
     setLast('');
-    alert('この話の記録を消しました');
+    // 挿絵の訳（WTの仕組みで保存している）も、この話の分は消す。消さないと、開き直したときに挿絵の訳だけまた出てくる
+    let ni = 0; try { if (wtApi && wtApi.clearPage) ni = wtApi.clearPage(); } catch { /* 挿絵なし */ }
+    alert('この話の記録を消しました' + (ni ? `（挿絵${ni}枚分も）` : '') + '。ページを読み直します');
+    location.reload();
   });
   GM_registerMenuCommand('この作品の「前の話の続き」をリセット', () => {
     GM_deleteValue(tailKey());
@@ -3777,8 +3780,10 @@ ${body}</main></body></html>`;
     return posDist <= 14 ? e.key : null;
   }
   let posDist = 99; // 最後に「位置」で見つけた記録との指紋のずれ
+  const imgKeyMap = new WeakMap(); // 画像 → 表示している保存の訳の番号（この話の訳を消すときに使う）
   function pageRemember(img, d, key) {
     if (!key) return;
+    imgKeyMap.set(img, key);
     const k = pageKey();
     const p = store.get(k, null) || { title: document.title, url: location.href, idx: {} };
     const i = imgIndex(img), old = p.idx[i];
@@ -5039,7 +5044,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
 .ezc-b.ezc-peek{opacity:0}
 .ezc-ov.ezc-dbg{outline:2px dashed rgba(255,0,140,.85)!important;outline-offset:-2px}
 .ezc-dbg .ezc-b{outline:2px solid rgba(0,160,255,.9)}
-.ezc-dbg .ezc-b[data-why]::before{content:attr(data-why);position:absolute;left:0;top:-15px;font:600 10px/1.3 system-ui,sans-serif;padding:0 4px;background:#ffe14d;color:#000;white-space:nowrap;z-index:1}
+.ezc-dbg .ezc-b[data-why]::before{content:attr(data-why) "　原文末：" attr(data-se);position:absolute;left:0;top:-15px;font:600 10px/1.3 system-ui,sans-serif;padding:0 4px;background:#ffe14d;color:#000;white-space:nowrap;z-index:1}
 .ezc-dbg .ezc-c{outline:2px dotted rgba(255,160,0,.95)}
 .ezc-dbgl{position:absolute;left:4px;top:4px;font:600 11px/1.2 system-ui,sans-serif;padding:3px 6px;border-radius:4px;background:rgba(255,0,140,.85);color:#fff}
 .ezc-badge{position:absolute;top:8px;right:8px;pointer-events:auto;font:600 12px/1.2 system-ui,sans-serif;padding:6px 10px;border-radius:999px;background:rgba(24,24,32,.82);color:#fff;max-width:70%;}
@@ -5258,6 +5263,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       }
       b.dataset.fx = (it.bd ? 'b' : '') + (it.itl ? 'i' : '') + (it.stk ? 's' : '') + (it.ul ? 'u' : '');
       if (it.kind) b.dataset.kind = it.kind;
+      if (S.debug && it.src) b.dataset.se = String(it.src).replace(/\s+/g, ' ').trim().slice(-10); // 確認モード：原文の最後（モデルが最後の行まで読んだか）
       // 斜めに置かれた文：箱の中に収まる長さで、同じ角度に傾けて置く
       if (it.ang && !b.dataset.lb) {
         const th = (it.ang * Math.PI) / 180, cs = Math.abs(Math.cos(th)), sn = Math.abs(Math.sin(th));
@@ -6484,6 +6490,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     <button class="pri" id="save">保存</button>
     <button id="redo">この画面を訳し直す</button>
     <button id="redoAll">この話を全部訳し直す</button>
+    <button id="pclr">この話の保存した訳を消す</button>
     <button id="clr">保存した訳を全部消す</button>
     <button id="close">閉じる</button>
   </div>
@@ -6518,6 +6525,19 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     },
     setOn: () => setOn(),
     illust: (v) => illust(v),
+    // この話（このページ）の画像の保存した訳を消す。ほかの話・作品の訳は残す
+    clearPage: () => {
+      const keys = new Set();
+      for (const k of [pageKey(), oldPageKey()]) {
+        const p = store.get(k, null);
+        if (p && p.idx) Object.values(p.idx).forEach((e) => { if (e && e.key) keys.add(e.key); });
+        del(k);
+      }
+      allImgs().forEach((img) => { const k = imgKeyMap.get(img); if (k) keys.add(k); });
+      for (const k of keys) { del('ezc_c:' + k); del('ezc_e:' + k); del('ezc_t:' + k); }
+      setIdx(getIdx().filter((k) => !keys.has(k)), true);
+      return keys.size;
+    },
     // 画面に出ている挿絵のうち、まだ訳を表示していない（または訳している最中の）枚数
     visibleIllustKey: () => { const vh = innerHeight; return allImgs().filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && eligible(i); }).map((i) => imgIndex(i) + ':' + hash(String(i.currentSrc || i.src))).join(','); }, // アドレス全体で見分ける（末尾だけだと同じになることがある）
     // 画面に出ている挿絵のうち、訳を表示しているもの
@@ -6649,6 +6669,12 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   $('close').onclick = () => ($('sheet').hidden = true);
   // 動かしている間もその場で大きさを確認できる
   $('ts').oninput = () => { $('tsv').textContent = $('ts').value; S.textScale = +$('ts').value; overlays.forEach((ov) => { ov.dataset.fitted = '0'; fitAll(ov); }); };
+  $('pclr').onclick = () => {
+    if (!confirm('この話の画像（挿絵）の保存した訳を消す？（ほかの話・クラウドのバックアップは残る）')) return;
+    const n = wtApi.clearPage();
+    toast(`この話の保存した訳を消した（${n}枚分）。ページを読み直します`);
+    setTimeout(() => location.reload(), 900);
+  };
   $('clr').onclick = () => {
     if (!confirm('全作品の保存した訳を全部消す？（クラウドのバックアップは残る）')) return;
     cacheClear(); toast('保存した訳を全部消した。ページを読み直します');
