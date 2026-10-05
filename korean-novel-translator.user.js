@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.51
+// @version      10.5.53
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2937,6 +2937,7 @@ ${body}</main></body></html>`;
       l = Math.max(0, Math.min(innerWidth - r.width, l));
       t = Math.max(0, Math.min(innerHeight - r.height, t));
       Object.assign(dock.style, { left: l + 'px', top: t + 'px', right: 'auto', bottom: 'auto' });
+      try { if (wtPageNow && wtApi) wtApi.placeAt(fab.getBoundingClientRect()); } catch { /* WTなし */ } // ⚙が動いたらWTボタンも一緒に
       return { l, t };
     }
     // パソコン用の広いページをスマホで縮めて見ているとき（晋江など）は、ボタン・お知らせ・設定画面を同じ割合で大きくする
@@ -3299,6 +3300,7 @@ ${body}</main></body></html>`;
   let syncRaf = 0;
   const syncSoon = () => { cancelAnimationFrame(syncRaf); syncRaf = requestAnimationFrame(() => { syncWT(); setTimeout(syncWT, 250); }); };
   addEventListener('resize', syncSoon);
+  setInterval(syncWT, 700); // 画面の高さが変わった・サイトが位置を変えたなど、どんなときでもWTボタンを⚙の横に戻す
   addEventListener('orientationchange', syncSoon);
   if (window.visualViewport) { visualViewport.addEventListener('resize', syncSoon); } // var：上の check() から先に参照されるため
   // WTが動いていないページ（iframeの中など）でも、保存してある設定は表示できるように
@@ -3334,14 +3336,17 @@ ${body}</main></body></html>`;
     const h = location.hostname;
     if (/(^|\.)comic\.naver\.com$/.test(h)) return 'wt';
     if (/jjwxc|archiveofourown/.test(h)) return 'novel';
-    let txt = 0, big = 0;
+    let txt = 0, big = 0, wide = 0;
     const minW = Math.min(300, innerWidth * 0.6);
     for (const r of deepRoots()) {
       try { for (const el of collectParas(r)) { if (isUiText(el)) continue; txt += (el.textContent || '').trim().length; if (txt > 3000) break; } } catch { /* 数えられない */ }
-      try { for (const im of r.querySelectorAll('img,canvas')) { const b = im.getBoundingClientRect(); if (b.width >= minW && b.height >= 200) big++; } } catch { /* 数えられない */ }
+      try { for (const im of r.querySelectorAll('img,canvas')) { const b = im.getBoundingClientRect(); if (b.width >= minW) { wide++; if (b.height >= 200) big++; } } } catch { /* 数えられない */ }
     }
-    if (txt >= 2000 || (txt >= 400 && big < 5)) return 'novel';
-    if (big >= 3 && txt < 400) return 'wt';
+    // 迷ったら切り替えない（今のモードのまま）。WTのページはコメントやあらすじで文字が多いこともあるので、
+    // 画面幅の画像がたくさん並んでいたら（まだ読み込み中でも）小説にはしない
+    if (big >= 5 || (big >= 3 && txt < 1500)) return 'wt';
+    if (wide >= 3) return null;
+    if (txt >= 400 && big <= 2) return 'novel';
     return null;
   }
   function autoModeTick() {
