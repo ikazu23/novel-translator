@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.56
+// @version      10.5.57
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -3476,6 +3476,12 @@ ${body}</main></body></html>`;
   let S = Object.assign({}, DEFAULTS, store.get('ezc_settings', {}));
   const saveS = () => store.set('ezc_settings', S);
   if (/gemini-2\.5/.test(S.models)) { S.models = DEFAULTS.models; saveS(); } // 提供終了モデルを置き換え
+  // 10.5.54〜56 は、一時的な混雑でも小説のモデル（3.5-flash）を先に使う設定に変えてしまうことがあった。一度だけ元に戻す
+  // （本当にそのキーで使えないモデルなら、次に訳すときにまた自動で切り替わる）
+  if (!S.modelsFix57) {
+    if (/^\s*gemini-3\.5-flash\s*,\s*gemini-3\.8-flash\s*$/.test(S.models || '')) S.models = DEFAULTS.models;
+    S.modelsFix57 = true; saveS();
+  }
   const HOST = location.hostname;
   // キー・トークンが空欄なら、小説翻訳の設定のものを使う
   const keyOf = () => (S.apiKey || novelGeminiKey() || '').trim();
@@ -4262,6 +4268,7 @@ ${w.story || '（なし）'}
       : /gemini-3/.test(m) ? { thinkingLevel: /pro/.test(m) ? 'low' : 'minimal' } : null);
     const bodyFor = (m, think) => JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: Object.assign({}, generationConfig, think ? { thinkingConfig: think } : {}), safetySettings });
     let last = new Error('モデル未設定');
+    let unusable = false; // 設定のモデルが「このキーでは使えない」と言われた（混雑・一時的なエラーとは別）
     for (let mi = 0; mi < models.length; mi++) {
       const m = models[mi];
       let think = thinkFor(m);
@@ -4286,7 +4293,7 @@ ${w.story || '（なし）'}
             if (/RECITATION|SAFETY|PROHIBITED|BLOCKLIST|OTHER/.test(reason) && mi < models.length - 1) break; // ほかのモデルなら通るかも
             throw last;
           }
-          if (mi >= userCount && m === novelModel && !freeSwitched) { // 設定のモデルが使えず、小説のモデルで訳せた：次からはこのモデルを先に使う
+          if (mi >= userCount && m === novelModel && !freeSwitched && unusable) { // 設定のモデルが使えず、小説のモデルで訳せた：次からはこのモデルを先に使う
             freeSwitched = true;
             S.models = [m].concat(models.slice(0, userCount)).join(', ');
             saveS();
@@ -4313,12 +4320,12 @@ ${w.story || '（なし）'}
         }
         if (r.status === 404 && mi < models.length - 1) break;
         // このキーでは使えないモデル（有料のみ・権限なし）：ほかのモデルなら通るかも
-        if ((r.status === 403 || r.status === 400) && /billing|paid|free[ _]tier|not (available|supported)|permission|access/i.test(msg) && !/API key not valid|API_KEY_INVALID/i.test(msg) && mi < models.length - 1) break;
+        if ((r.status === 403 || r.status === 400) && /billing|paid|free[ _]tier|not (available|supported)|permission|access/i.test(msg) && !/API key not valid|API_KEY_INVALID/i.test(msg) && mi < models.length - 1) { unusable = true; break; }
         if (r.status === 429) {
           // 1日の上限は待っても無駄なので次のモデルへ
           if (/per[_ ]?day|PerDay|requests_per_day/i.test(msg)) break;
           const lim = /free_tier_requests, limit: (\d+)/.exec(msg);
-          if (/limit: 0\b/.test(msg) || (lim && Number(lim[1]) === 0)) break; // 無料枠では使えないモデル（上限0回）：待っても無駄なので次のモデルへ
+          if (/limit: 0\b/.test(msg) || (lim && Number(lim[1]) === 0)) { unusable = true; break; } // 無料枠では使えないモデル（上限0回）：待っても無駄なので次のモデルへ
           if (lim) {
             minGap = Math.max(minGap, Math.ceil(60000 / Number(lim[1])) + 500);
             if (!rpmNotified) { rpmNotified = true; toast(`無料枠（1分${lim[1]}回）なので間隔をあけて訳すね`); }
