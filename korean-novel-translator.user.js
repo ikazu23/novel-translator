@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.57
+// @version      10.5.59
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4843,6 +4843,49 @@ ${w.story || '（なし）'}
   // その行の字の色（周りの地の色と違う画素でいちばん多い色）。分からなければ ''
   const icv = document.createElement('canvas');
   const ig = icv.getContext('2d', { willReadFrequently: true });
+  // モデルが行の位置（lines_2d）を返さなかったとき：画像を見て、文字の行を自分で探す（行ごとの字の濃さで区切る）
+  // モデルや無料枠のモデルによって返ったり返らなかったりするので、ここで補う
+  function detectLines(st, r) {
+    try {
+      const bw = r.x1 - r.x0, bh = r.y1 - r.y0;
+      if (bw <= 0 || bh <= 0) return null;
+      const MW = Math.max(32, Math.min(320, Math.round(bw * st.W))), MH = Math.max(24, Math.min(900, Math.round(bh)));
+      icv.width = MW; icv.height = MH;
+      ig.clearRect(0, 0, MW, MH);
+      drawStrip(ig, st, r.x0 * st.W, r.y0, bw * st.W, bh, 0, 0, MW, MH);
+      const px = ig.getImageData(0, 0, MW, MH).data;
+      const all = new Uint32Array(512), keyAt = new Int16Array(MW * MH);
+      for (let i = 0; i < MW * MH; i++) { const o = i * 4; if (px[o + 3] < 200) { keyAt[i] = -1; continue; } const k = ((px[o] >> 5) << 6) | ((px[o + 1] >> 5) << 3) | (px[o + 2] >> 5); keyAt[i] = k; all[k]++; }
+      let bk = -1; for (let k = 0; k < 512; k++) if (all[k] && (bk < 0 || all[k] > all[bk])) bk = k;
+      if (bk < 0 || all[bk] < MW * MH * 0.35) return null; // 地の色がはっきりしない（絵の上の文字など）は探さない
+      const rgb = (k) => [((k >> 6) & 7) * 32 + 16, ((k >> 3) & 7) * 32 + 16, (k & 7) * 32 + 16];
+      const bg = rgb(bk);
+      const ink = new Uint8Array(512); for (let k = 0; k < 512; k++) { const c = rgb(k); ink[k] = all[k] && Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) >= 120 ? 1 : 0; }
+      const rowInk = new Uint32Array(MH);
+      for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) { const k = keyAt[y * MW + x]; if (k >= 0 && ink[k]) rowInk[y]++; }
+      const th = Math.max(2, MW * 0.01);
+      const bands = [];
+      for (let y = 0; y < MH; y++) {
+        if (rowInk[y] < th) continue;
+        const last = bands[bands.length - 1];
+        if (last && y - last.y1 <= Math.max(2, (last.y1 - last.y0) * 0.15)) last.y1 = y + 1; else bands.push({ y0: y, y1: y + 1 });
+      }
+      const hs = bands.map((b) => b.y1 - b.y0).sort((a, b) => a - b);
+      const med = hs[hs.length >> 1] || 0;
+      const good = bands.filter((b) => b.y1 - b.y0 >= Math.max(4, med * 0.45)); // 点や線のかけらは行にしない
+      if (good.length < 3) return null;
+      const s = bh / MH;
+      return good.map((b) => {
+        let x0 = MW, x1 = 0;
+        for (let y = b.y0; y < b.y1; y++) for (let x = 0; x < MW; x++) { const k = keyAt[y * MW + x]; if (k >= 0 && ink[k]) { if (x < x0) x0 = x; if (x >= x1) x1 = x + 1; } }
+        if (x1 <= x0) return null;
+        // 少しだけ外側まで含める（字だけの箱だと、太い字では字の色の方が多くなって色を取り違えるため）
+        const ph = (b.y1 - b.y0) * 0.15, pw = (b.y1 - b.y0) * 0.4 * (MW / Math.max(1, bw * st.W)) * (bh / MH);
+        return { x0: r.x0 + (Math.max(0, x0 - pw) / MW) * bw, x1: r.x0 + (Math.min(MW, x1 + pw) / MW) * bw, y0: r.y0 + Math.max(0, b.y0 - ph) * s, y1: r.y0 + Math.min(MH, b.y1 + ph) * s };
+      }).filter(Boolean);
+    } catch (e) { return null; }
+  }
+
   function inkColor(st, l) {
     try {
       const MW = 64, MH = 12;
@@ -4940,6 +4983,7 @@ ${w.story || '（なし）'}
     if (a.underline === true) it.ul = 1;
     { const an = Math.round(+a.angle || 0); if (Math.abs(an) >= 5 && Math.abs(an) <= 80) it.ang = an; }
     // 原文の各行の位置（文字の並びで形を作っている文：縄・波など。訳も同じ形に並べる）
+    if (r.kind !== 'speech' && !(Array.isArray(r.lines) && r.lines.length >= 3)) { const dl = detectLines(st, r); if (dl && dl.length >= 3) r.lines = dl; }
     if (Array.isArray(r.lines) && r.lines.length >= 3 && r.kind !== 'speech') {
       const bw = r.x1 - r.x0, bh = r.y1 - r.y0, q = (v) => Math.round(v * 1000) / 1000;
       const sl = r.lines.slice().sort((p1, p2) => p1.y0 - p2.y0 || p1.x0 - p2.x0);
@@ -5492,6 +5536,15 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     return true;
   }
 
+  function isPicture(b) {
+    try {
+      const prof = JSON.parse(b.dataset.lp || 'null');
+      if (!prof || !Array.isArray(prof.lp) || prof.lp.length < 3) return false;
+      // 半分以上の行で、2色以上がそれぞれ3マス以上ある
+      const mixed = prof.lp.filter((row) => { const c = {}; for (const ch of row) if (ch !== '-') c[ch] = (c[ch] || 0) + 1; return Object.values(c).filter((n) => n >= 3).length >= 2; }).length;
+      return mixed >= Math.ceil(prof.lp.length / 2);
+    } catch (e) { return false; }
+  }
   function layoutCJK(b, ow) {
     const tr = (b.dataset.tr || '').replace(/\s*\n\s*/g, '').trim(); // モデルの改行は捨てて、こっちで組み直す
     const vertical = b.classList.contains('ezc-v');
@@ -5541,7 +5594,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     const cap = ow * (b.dataset.free ? 0.14 : 0.075);
     const size = Math.max(6, Math.min(best.size * fill, cap, origSize(b)) * (S.textScale || 100) / 100);
     // 原文の行の形どおりに並べられるなら、そうする。ただし字がふつうの並べ方の7割より小さくなるときは読みやすさを優先
-    if (b.dataset.lb && layoutShape(b, tr, size * 0.7)) return;
+    // 行の中で色が混ざっている（灰色の文の中の黒い字で縄を描く、など）ときは、絵が大事なので少し小さくなっても形を優先する
+    if (b.dataset.lb && layoutShape(b, tr, size * (isPicture(b) ? 0.5 : 0.7))) return;
     paintRuns(b, best.lines);
     b.style.whiteSpace = 'nowrap';
     b.style.fontSize = size.toFixed(2) + 'px';
