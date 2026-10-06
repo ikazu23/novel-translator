@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.66
+// @version      10.5.67
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2244,7 +2244,9 @@ ${body}</main></body></html>`;
     copyCtx = null;
     const srcs = els.map(serialize);
     const src = srcs.map(stripTags).join('\n\n');
-    const key = tagged('cache2:' + hash(location.pathname + location.search + src));
+    lastCacheBase = 'cache2:' + hash(location.pathname + location.search + src); // 「この話の訳を消す」で使う
+    lastSrcs = srcs;
+    const key = tagged(lastCacheBase);
 
     if (force) GM_deleteValue(key + ':fx');
     let cached = !force && GM_getValue(key);
@@ -2707,6 +2709,8 @@ ${body}</main></body></html>`;
           <label>クラウドに自動バックアップ（GitHubのトークン。gist の権限だけでOK。スマホを無くしても別の端末で戻せます） <input name="gistToken" type="password" autocomplete="off" placeholder="github_pat_… / ghp_…"></label>
           <label class="check"><input type="checkbox" name="autoBackup"> 訳すたびに自動でクラウドへ保存（最後の変更から1分後）</label>
           <div class="row"><button data-a="cloudSave" class="primary">今すぐクラウドに保存</button><button data-a="cloudLoad">クラウドから戻す</button></div>
+          <div class="sec">訳を消す</div>
+          <div class="row"><button data-a="epClr">この話の訳を消す</button><button data-a="allClr">小説の訳を全部消す</button></div>
           <input type="file" name="importFile" accept=".json,application/json" hidden>
           </div>
           <div class="cfg-wt" hidden>
@@ -3007,6 +3011,8 @@ ${body}</main></body></html>`;
       if (a === 'export') exportData();
       if (a === 'cloudSave') { saveGist(); backupNow(true); }
       if (a === 'cloudLoad') { saveGist(); restoreFromCloud(); }
+      if (a === 'epClr') clearEpisode();
+      if (a === 'allClr') clearAllNovel();
       if (a === 'zip') saveWorkZip(e.target.closest('[data-a]').dataset.wk);
       if (a === 'works') showWorkList();
       if (a === 'import') f('importFile').click();
@@ -3244,17 +3250,7 @@ ${body}</main></body></html>`;
     setLast('');
     alert('並びをリセットしました。最初から「訳」を押しながら読み進めてください');
   });
-  GM_registerMenuCommand('この話の訳の記録を消す（カカオの表示中翻訳）', () => {
-    if (!confirm('この話で訳した文と挿絵の記録を消します。よろしいですか？')) return;
-    GM_deleteValue(liveKey());
-    liveData = null;
-    ui.cardClose();
-    setLast('');
-    // 挿絵の訳（WTの仕組みで保存している）も、この話の分は消す。消さないと、開き直したときに挿絵の訳だけまた出てくる
-    let ni = 0; try { if (wtApi && wtApi.clearPage) ni = wtApi.clearPage(); } catch { /* 挿絵なし */ }
-    alert('この話の記録を消しました' + (ni ? `（挿絵${ni}枚分も）` : '') + '。ページを読み直します');
-    location.reload();
-  });
+  GM_registerMenuCommand('この話の訳を消す', () => clearEpisode());
   GM_registerMenuCommand('この作品の「前の話の続き」をリセット', () => {
     GM_deleteValue(tailKey());
     alert('リセットしました（人物・用語メモはそのまま）');
@@ -3279,13 +3275,53 @@ ${body}</main></body></html>`;
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
-  GM_registerMenuCommand('保存済みの訳を全削除', () => {
+  GM_registerMenuCommand('保存済みの訳を全削除', () => clearAllNovel());
+  // この話の訳（本文・カカオの表示中翻訳・挿絵）を消して、ページを読み直す。ほかの話・作品メモ・クラウドは残す
+  var lastCacheBase, lastSrcs; if (lastCacheBase === undefined) { lastCacheBase = ''; lastSrcs = []; }
+  async function clearEpisode() {
+    if (!confirm('この話の訳（本文と挿絵）を消します。よろしいですか？')) return;
+    const drop = new Set();
+    // base：エンジン名なしの古い形と、「base@エンジン」の形の両方を消す（古い形が残ると、また読み込まれてしまう）
+    const del = (base) => GM_listValues().filter((k) => k === base || k.startsWith(base + '@')).forEach(GM_deleteValue);
+    try {
+      // その場で訳す読み方：本文から保存の番号を作り直して消す（どのエンジンの分も）
+      const roots = findBodies();
+      if (roots.length) {
+        await prepBodies(cfg(), roots);
+        const els = roots.flatMap((r) => collectParas(r).filter((el) => !inNonBody(el, r) && !isUiWord(el.textContent)));
+        const srcs = els.map(serialize);
+        const src = srcs.map(stripTags).join('\n\n');
+        const base = 'cache2:' + hash(location.pathname + location.search + src);
+        del(base); del(base + ':fx');
+        srcs.forEach((x) => drop.add(x));
+      }
+    } catch { /* 本文なし */ }
+    if (lastCacheBase) del(lastCacheBase); // 訳した後（画面が日本語になっている）は、訳したときの番号で消す
+    (lastSrcs || []).forEach((x) => drop.add(x));
+    // 段落ごとの訳の控え（同じ作品の中で同じ段落を使い回す分）からも、この話の段落を外す。外さないと、訳し直さずにまた出てくる
+    if (drop.size) {
+      const pk = 'para:' + workKey();
+      GM_listValues().filter((k) => k === pk || k.startsWith(pk + '@')).forEach((k) => {
+        const m = GM_getValue(k, null); if (!m || typeof m !== 'object') return;
+        let n = 0; for (const x of drop) if (x in m) { delete m[x]; n++; }
+        if (n) GM_setValue(k, m);
+      });
+    }
+    del('live:' + location.host + location.pathname); // カカオの表示中翻訳
+    del('ep:' + workKey() + '|' + pageId()); // 話の控え
+    liveData = null;
+    let ni = 0; try { if (wtApi && wtApi.clearPage) ni = wtApi.clearPage(); } catch { /* 挿絵なし */ }
+    alert('この話の訳を消しました' + (ni ? `（挿絵${ni}枚分も）` : '') + '。ページを読み直します');
+    location.reload();
+  }
+  // 小説の訳を全部消す（作品メモ・設定・WTの訳は残す）
+  function clearAllNovel() {
     if (!confirm('この端末に保存した小説の訳を全部消します（作品メモ・設定は残ります）。元に戻せません。よろしいですか？')) return;
     const keys = GM_listValues().filter(k => k.startsWith('cache') || k.startsWith('live:') || k.startsWith('para:') || k.startsWith('ep:') || k.startsWith('tail:'));
     keys.forEach(GM_deleteValue);
     alert(keys.length + '件削除しました。ページを読み直します');
     location.reload(); // 画面に出ている訳・覚えている訳を、また保存してしまわないように
-  });
+  }
 
   // ================= WT（まんが・ウェブトゥーン）翻訳モード =================
   // 画像の吹き出しを読み取って、訳を吹き出しの上に重ねる。サイトごとにオン／オフ（メニュー・設定から）
