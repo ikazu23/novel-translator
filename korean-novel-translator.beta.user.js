@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.67
+// @version      10.5.68
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -5109,12 +5109,36 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   const overlays = new Map(); // img -> overlay div
   const doneSrc = new WeakMap(); // img -> 翻訳済みのsrc
 
+  // 画像の箱の中で、絵が実際に描かれている範囲（object-fit: contain などで、箱の上下・左右に余白があるとき）。
+  // iPhoneのカカオなどでは箱と絵の縦横の比が違い、箱いっぱいに訳を置くと上下にずれて後ろの原文が透けて見えたため
+  function fitRect(img, r) {
+    try {
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      if (!nw || !nh || !r.width || !r.height) return r;
+      if (Math.abs(r.height / r.width - nh / nw) / (nh / nw) < 0.01) return r; // 比が同じ：そのまま
+      const cs = getComputedStyle(img), fit = cs.objectFit || 'fill';
+      if (fit === 'fill') return r; // 箱に合わせて絵も伸びている：箱どおりでよい
+      let sc = fit === 'cover' ? Math.max(r.width / nw, r.height / nh) : Math.min(r.width / nw, r.height / nh);
+      if (fit === 'none') sc = 1;
+      if (fit === 'scale-down') sc = Math.min(1, Math.min(r.width / nw, r.height / nh));
+      const w = nw * sc, h = nh * sc;
+      // 位置（object-position）：ふつうは真ん中。「0% 0%」など左上寄せにも対応
+      const pos = (cs.objectPosition || '50% 50%').split(/\s+/);
+      const frac = (v, free) => { if (!v) return 0.5; if (/%$/.test(v)) return parseFloat(v) / 100; if (v === 'left' || v === 'top') return 0; if (v === 'right' || v === 'bottom') return 1; if (v === 'center') return 0.5; const px = parseFloat(v); return free ? (px / free) : 0.5; };
+      const fx = frac(pos[0], r.width - w), fy = frac(pos[1] || pos[0], r.height - h);
+      const left = r.left + (r.width - w) * fx, top = r.top + (r.height - h) * fy;
+      const out = { left, top, width: w, height: h, right: left + w, bottom: top + h };
+      if (r.clip) out.clip = r.clip;
+      else if (w > r.width + 1 || h > r.height + 1) out.clip = { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; // coverではみ出す分は見せない
+      return out;
+    } catch (e) { return r; }
+  }
   function placeOverlay(img, ov) {
     if (!img.isConnected) { ov.remove(); overlays.delete(img); return; }
     if (ov.style.display) ov.style.display = '';
     if (!ov.isConnected) getLayer().appendChild(ov); // サイトが訳の層を消したときは付け直す
     // 位置は層（ページ左上）からの差で決める。変わっていなければ書き込まない（スクロール中のカクつき防止）
-    const ir = rectOf(img), lr = (ov.parentNode || getLayer()).getBoundingClientRect();
+    const ir = fitRect(img, rectOf(img)), lr = (ov.parentNode || getLayer()).getBoundingClientRect();
     const st = ov.style, L = (ir.left - lr.left) + 'px', T = (ir.top - lr.top) + 'px', W = ir.width + 'px', H = ir.height + 'px';
     if (st.left !== L) st.left = L;
     if (st.top !== T) st.top = T;
@@ -5235,7 +5259,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     if (S.debug) {
       const l = document.createElement('div');
       l.className = 'ezc-dbgl';
-      l.textContent = `#${imgIndex(img)} ${img.naturalWidth}×${img.naturalHeight} ／ ${items.length}件 ／ ${img.dataset.ezcHow || ''}${img.dataset.ezcFix ? ' ／ 比率補正 ' + img.dataset.ezcFix : ''}`;
+      l.textContent = `#${imgIndex(img)} ${img.naturalWidth}×${img.naturalHeight} ／ ${items.length}件 ／ ${img.dataset.ezcHow || ''}${img.dataset.ezcFix ? ' ／ 比率補正 ' + img.dataset.ezcFix : ''}${(() => { try { const r = img.getBoundingClientRect(); const bx = r.height / r.width, nt = img.naturalHeight / img.naturalWidth; return Math.abs(bx - nt) / nt >= 0.01 ? ` ／ 箱${bx.toFixed(3)}・絵${nt.toFixed(3)}（${getComputedStyle(img).objectFit}）` : ''; } catch (e) { return ''; } })()}`;
       ov.appendChild(l);
     }
     const imgRatio = (img.naturalHeight || 1) / (img.naturalWidth || 1);
