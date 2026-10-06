@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.64
+// @version      10.5.65
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4094,7 +4094,24 @@ ${w.story || '（なし）'}
     } catch (e) { return null; }
   }
 
+  // 読み取った画像と、ページに表示されている画像の縦横の比が違うとき（ブラウザ・取り方によって、サイトが別の大きさ・形式の画像を返すことがある。iPhoneのOrionなど）
+  // は、表示されている形に合わせる。合わせないと、訳と消し板の位置が上下にずれて、後ろの原文が透けて見える
   async function getDrawable(img) {
+    const d = await getDrawableRaw(img);
+    try {
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      if (!d || d.keep || !nw || !nh || !d.w || !d.h) return d;
+      const want = nh / nw, have = d.h / d.w;
+      if (Math.abs(have - want) / want < 0.015) return d;
+      const W = d.w, H = Math.max(1, Math.round(d.w * want));
+      img.dataset.ezcFix = d.w + '×' + d.h + '→' + W + '×' + H; // 確認モードで見えるように
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      c.getContext('2d').drawImage(d.src, 0, 0, W, H);
+      try { if (d.src.close) d.src.close(); } catch (e) { /* そのまま */ }
+      return { src: c, w: W, h: H };
+    } catch (e) { return d; }
+  }
+  async function getDrawableRaw(img) {
     const src = img.currentSrc || img.src;
     if (/^(blob|data):/.test(src)) {
       const d = drawableFromImg(img);
@@ -5180,7 +5197,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     if (S.debug) {
       const l = document.createElement('div');
       l.className = 'ezc-dbgl';
-      l.textContent = `#${imgIndex(img)} ${img.naturalWidth}×${img.naturalHeight} ／ ${items.length}件 ／ ${img.dataset.ezcHow || ''}`;
+      l.textContent = `#${imgIndex(img)} ${img.naturalWidth}×${img.naturalHeight} ／ ${items.length}件 ／ ${img.dataset.ezcHow || ''}${img.dataset.ezcFix ? ' ／ 比率補正 ' + img.dataset.ezcFix : ''}`;
       ov.appendChild(l);
     }
     const imgRatio = (img.naturalHeight || 1) / (img.naturalWidth || 1);
