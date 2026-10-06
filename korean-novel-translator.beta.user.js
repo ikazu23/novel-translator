@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.65
+// @version      10.5.66
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4271,7 +4271,9 @@ ${w.story || '（なし）'}
       parts.push({ inline_data: { mime_type: 'image/jpeg', data: b } });
     });
     parts.push({ text: buildPrompt() });
-    const text = await geminiRaw(parts, { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.3 }, onWait);
+    // ふだんはぶれを小さく（毎回ほぼ同じ読み取り）。訳し直すときだけ少しぶれを大きくして、前と違う読み取りを試す
+    const temp = typeof redoing !== 'undefined' && redoing ? 0.6 : 0.15;
+    const text = await geminiRaw(parts, { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: temp }, onWait);
     const clean = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
     const arr = clean ? JSON.parse(clean) : [];
     return Array.isArray(arr) ? arr : [];
