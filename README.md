@@ -25,6 +25,7 @@
    - **iPhone / iPad**：
      - Safari ＋ App Storeの Tampermonkey（有料・500円ほど）
      - または **Orion ブラウザ** ＋ Violentmonkey（無料）：Orionで [Violentmonkey のページ](https://addons.mozilla.org/firefox/addon/violentmonkey/) を開いて追加
+       - ※ Orionは拡張の対応が完全ではなく、挿絵・WTの翻訳がうまくいかないことがあります。安定して使いたい場合は Safari ＋ Tampermonkey がおすすめです
    - **PC**：Chrome・Edge・Firefox
    - 無料の **Violentmonkey** でも使えます（[Firefox用](https://addons.mozilla.org/firefox/addon/violentmonkey/)・AndroidのFirefoxも同じページから）
 2. 下のリンクを開いて「インストール」を押す（Tampermonkey・Violentmonkey どちらも同じリンク）

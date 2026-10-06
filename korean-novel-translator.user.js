@@ -2,7 +2,7 @@
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
-// @version      10.5.59
+// @version      10.5.67
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2244,7 +2244,9 @@ ${body}</main></body></html>`;
     copyCtx = null;
     const srcs = els.map(serialize);
     const src = srcs.map(stripTags).join('\n\n');
-    const key = tagged('cache2:' + hash(location.pathname + location.search + src));
+    lastCacheBase = 'cache2:' + hash(location.pathname + location.search + src); // 「この話の訳を消す」で使う
+    lastSrcs = srcs;
+    const key = tagged(lastCacheBase);
 
     if (force) GM_deleteValue(key + ':fx');
     let cached = !force && GM_getValue(key);
@@ -2707,6 +2709,8 @@ ${body}</main></body></html>`;
           <label>クラウドに自動バックアップ（GitHubのトークン。gist の権限だけでOK。スマホを無くしても別の端末で戻せます） <input name="gistToken" type="password" autocomplete="off" placeholder="github_pat_… / ghp_…"></label>
           <label class="check"><input type="checkbox" name="autoBackup"> 訳すたびに自動でクラウドへ保存（最後の変更から1分後）</label>
           <div class="row"><button data-a="cloudSave" class="primary">今すぐクラウドに保存</button><button data-a="cloudLoad">クラウドから戻す</button></div>
+          <div class="sec">訳を消す</div>
+          <div class="row"><button data-a="epClr">この話の訳を消す</button><button data-a="allClr">小説の訳を全部消す</button></div>
           <input type="file" name="importFile" accept=".json,application/json" hidden>
           </div>
           <div class="cfg-wt" hidden>
@@ -2741,7 +2745,7 @@ ${body}</main></body></html>`;
           <label>クラウドに自動バックアップ（GitHubのトークン。空欄なら小説と同じ） <input name="wt_gt" type="password" autocomplete="off" placeholder="github_pat_… / ghp_…"></label>
           <label class="check"><input type="checkbox" name="wt_ab"> 訳が増えたら自動でクラウドへ保存</label>
           <div class="row"><button data-a="wt-cs" class="primary">今すぐクラウドに保存</button><button data-a="wt-cl">クラウドから戻す</button></div>
-          <div class="row"><button data-a="wt-clr">保存したWTの訳を全部消す</button></div>
+          <div class="row"><button data-a="wt-pclr">この話の保存した訳を消す</button><button data-a="wt-clr">保存したWTの訳を全部消す</button></div>
           <input type="file" name="wt_imf" accept=".json,application/json" hidden>
           </div>
           <div class="support">
@@ -3007,6 +3011,8 @@ ${body}</main></body></html>`;
       if (a === 'export') exportData();
       if (a === 'cloudSave') { saveGist(); backupNow(true); }
       if (a === 'cloudLoad') { saveGist(); restoreFromCloud(); }
+      if (a === 'epClr') clearEpisode();
+      if (a === 'allClr') clearAllNovel();
       if (a === 'zip') saveWorkZip(e.target.closest('[data-a]').dataset.wk);
       if (a === 'works') showWorkList();
       if (a === 'import') f('importFile').click();
@@ -3244,14 +3250,7 @@ ${body}</main></body></html>`;
     setLast('');
     alert('並びをリセットしました。最初から「訳」を押しながら読み進めてください');
   });
-  GM_registerMenuCommand('この話の訳の記録を消す（カカオの表示中翻訳）', () => {
-    if (!confirm('この話で訳した文の記録を消します。よろしいですか？')) return;
-    GM_deleteValue(liveKey());
-    liveData = null;
-    ui.cardClose();
-    setLast('');
-    alert('この話の記録を消しました');
-  });
+  GM_registerMenuCommand('この話の訳を消す', () => clearEpisode());
   GM_registerMenuCommand('この作品の「前の話の続き」をリセット', () => {
     GM_deleteValue(tailKey());
     alert('リセットしました（人物・用語メモはそのまま）');
@@ -3276,12 +3275,53 @@ ${body}</main></body></html>`;
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
-  GM_registerMenuCommand('保存済みの訳を全削除', () => {
+  GM_registerMenuCommand('保存済みの訳を全削除', () => clearAllNovel());
+  // この話の訳（本文・カカオの表示中翻訳・挿絵）を消して、ページを読み直す。ほかの話・作品メモ・クラウドは残す
+  var lastCacheBase, lastSrcs; if (lastCacheBase === undefined) { lastCacheBase = ''; lastSrcs = []; }
+  async function clearEpisode() {
+    if (!confirm('この話の訳（本文と挿絵）を消します。よろしいですか？')) return;
+    const drop = new Set();
+    // base：エンジン名なしの古い形と、「base@エンジン」の形の両方を消す（古い形が残ると、また読み込まれてしまう）
+    const del = (base) => GM_listValues().filter((k) => k === base || k.startsWith(base + '@')).forEach(GM_deleteValue);
+    try {
+      // その場で訳す読み方：本文から保存の番号を作り直して消す（どのエンジンの分も）
+      const roots = findBodies();
+      if (roots.length) {
+        await prepBodies(cfg(), roots);
+        const els = roots.flatMap((r) => collectParas(r).filter((el) => !inNonBody(el, r) && !isUiWord(el.textContent)));
+        const srcs = els.map(serialize);
+        const src = srcs.map(stripTags).join('\n\n');
+        const base = 'cache2:' + hash(location.pathname + location.search + src);
+        del(base); del(base + ':fx');
+        srcs.forEach((x) => drop.add(x));
+      }
+    } catch { /* 本文なし */ }
+    if (lastCacheBase) del(lastCacheBase); // 訳した後（画面が日本語になっている）は、訳したときの番号で消す
+    (lastSrcs || []).forEach((x) => drop.add(x));
+    // 段落ごとの訳の控え（同じ作品の中で同じ段落を使い回す分）からも、この話の段落を外す。外さないと、訳し直さずにまた出てくる
+    if (drop.size) {
+      const pk = 'para:' + workKey();
+      GM_listValues().filter((k) => k === pk || k.startsWith(pk + '@')).forEach((k) => {
+        const m = GM_getValue(k, null); if (!m || typeof m !== 'object') return;
+        let n = 0; for (const x of drop) if (x in m) { delete m[x]; n++; }
+        if (n) GM_setValue(k, m);
+      });
+    }
+    del('live:' + location.host + location.pathname); // カカオの表示中翻訳
+    del('ep:' + workKey() + '|' + pageId()); // 話の控え
+    liveData = null;
+    let ni = 0; try { if (wtApi && wtApi.clearPage) ni = wtApi.clearPage(); } catch { /* 挿絵なし */ }
+    alert('この話の訳を消しました' + (ni ? `（挿絵${ni}枚分も）` : '') + '。ページを読み直します');
+    location.reload();
+  }
+  // 小説の訳を全部消す（作品メモ・設定・WTの訳は残す）
+  function clearAllNovel() {
     if (!confirm('この端末に保存した小説の訳を全部消します（作品メモ・設定は残ります）。元に戻せません。よろしいですか？')) return;
     const keys = GM_listValues().filter(k => k.startsWith('cache') || k.startsWith('live:') || k.startsWith('para:') || k.startsWith('ep:') || k.startsWith('tail:'));
     keys.forEach(GM_deleteValue);
-    alert(keys.length + '件削除しました');
-  });
+    alert(keys.length + '件削除しました。ページを読み直します');
+    location.reload(); // 画面に出ている訳・覚えている訳を、また保存してしまわないように
+  }
 
   // ================= WT（まんが・ウェブトゥーン）翻訳モード =================
   // 画像の吹き出しを読み取って、訳を吹き出しの上に重ねる。サイトごとにオン／オフ（メニュー・設定から）
@@ -3690,6 +3730,8 @@ ${body}</main></body></html>`;
     return n + Math.abs(a.length - b.length) * 4;
   }
   function cacheClear() {
+    // 覚えている索引も空にする（そのままだと、ページを閉じるときに消した索引を書き戻してしまう）
+    hIdxMem.clear(); hDirty.clear();
     for (const k of dataKeys()) del(k);
     for (const k of getIdx()) del('ezc_c:' + k);
     setIdx([], true);
@@ -3774,8 +3816,10 @@ ${body}</main></body></html>`;
     return posDist <= 14 ? e.key : null;
   }
   let posDist = 99; // 最後に「位置」で見つけた記録との指紋のずれ
+  const imgKeyMap = new WeakMap(); // 画像 → 表示している保存の訳の番号（この話の訳を消すときに使う）
   function pageRemember(img, d, key) {
     if (!key) return;
+    imgKeyMap.set(img, key);
     const k = pageKey();
     const p = store.get(k, null) || { title: document.title, url: location.href, idx: {} };
     const i = imgIndex(img), old = p.idx[i];
@@ -4086,7 +4130,24 @@ ${w.story || '（なし）'}
     } catch (e) { return null; }
   }
 
+  // 読み取った画像と、ページに表示されている画像の縦横の比が違うとき（ブラウザ・取り方によって、サイトが別の大きさ・形式の画像を返すことがある。iPhoneのOrionなど）
+  // は、表示されている形に合わせる。合わせないと、訳と消し板の位置が上下にずれて、後ろの原文が透けて見える
   async function getDrawable(img) {
+    const d = await getDrawableRaw(img);
+    try {
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      if (!d || d.keep || !nw || !nh || !d.w || !d.h) return d;
+      const want = nh / nw, have = d.h / d.w;
+      if (Math.abs(have - want) / want < 0.015) return d;
+      const W = d.w, H = Math.max(1, Math.round(d.w * want));
+      img.dataset.ezcFix = d.w + '×' + d.h + '→' + W + '×' + H; // 確認モードで見えるように
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      c.getContext('2d').drawImage(d.src, 0, 0, W, H);
+      try { if (d.src.close) d.src.close(); } catch (e) { /* そのまま */ }
+      return { src: c, w: W, h: H };
+    } catch (e) { return d; }
+  }
+  async function getDrawableRaw(img) {
     const src = img.currentSrc || img.src;
     if (/^(blob|data):/.test(src)) {
       const d = drawableFromImg(img);
@@ -4246,7 +4307,9 @@ ${w.story || '（なし）'}
       parts.push({ inline_data: { mime_type: 'image/jpeg', data: b } });
     });
     parts.push({ text: buildPrompt() });
-    const text = await geminiRaw(parts, { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.3 }, onWait);
+    // ふだんはぶれを小さく（毎回ほぼ同じ読み取り）。訳し直すときだけ少しぶれを大きくして、前と違う読み取りを試す
+    const temp = typeof redoing !== 'undefined' && redoing ? 0.6 : 0.15;
+    const text = await geminiRaw(parts, { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: temp }, onWait);
     const clean = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
     const arr = clean ? JSON.parse(clean) : [];
     return Array.isArray(arr) ? arr : [];
@@ -5036,6 +5099,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
 .ezc-b.ezc-peek{opacity:0}
 .ezc-ov.ezc-dbg{outline:2px dashed rgba(255,0,140,.85)!important;outline-offset:-2px}
 .ezc-dbg .ezc-b{outline:2px solid rgba(0,160,255,.9)}
+.ezc-dbg .ezc-b[data-why]::before{content:attr(data-why) "　原文末：" attr(data-se);position:absolute;left:0;top:-15px;font:600 10px/1.3 system-ui,sans-serif;padding:0 4px;background:#ffe14d;color:#000;white-space:nowrap;z-index:1}
 .ezc-dbg .ezc-c{outline:2px dotted rgba(255,160,0,.95)}
 .ezc-dbgl{position:absolute;left:4px;top:4px;font:600 11px/1.2 system-ui,sans-serif;padding:3px 6px;border-radius:4px;background:rgba(255,0,140,.85);color:#fff}
 .ezc-badge{position:absolute;top:8px;right:8px;pointer-events:auto;font:600 12px/1.2 system-ui,sans-serif;padding:6px 10px;border-radius:999px;background:rgba(24,24,32,.82);color:#fff;max-width:70%;}
@@ -5171,7 +5235,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     if (S.debug) {
       const l = document.createElement('div');
       l.className = 'ezc-dbgl';
-      l.textContent = `#${imgIndex(img)} ${img.naturalWidth}×${img.naturalHeight} ／ ${items.length}件 ／ ${img.dataset.ezcHow || ''}`;
+      l.textContent = `#${imgIndex(img)} ${img.naturalWidth}×${img.naturalHeight} ／ ${items.length}件 ／ ${img.dataset.ezcHow || ''}${img.dataset.ezcFix ? ' ／ 比率補正 ' + img.dataset.ezcFix : ''}`;
       ov.appendChild(l);
     }
     const imgRatio = (img.naturalHeight || 1) / (img.naturalWidth || 1);
@@ -5253,6 +5317,8 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
         if (!it.stroke) b.style.textShadow = 'none'; // 原文にフチがなければ、形を写す文にはフチを付けない（太く汚く見えるため）
       }
       b.dataset.fx = (it.bd ? 'b' : '') + (it.itl ? 'i' : '') + (it.stk ? 's' : '') + (it.ul ? 'u' : '');
+      if (it.kind) b.dataset.kind = it.kind;
+      if (S.debug && it.src) b.dataset.se = String(it.src).replace(/\s+/g, ' ').trim().slice(-10); // 確認モード：原文の最後（モデルが最後の行まで読んだか）
       // 斜めに置かれた文：箱の中に収まる長さで、同じ角度に傾けて置く
       if (it.ang && !b.dataset.lb) {
         const th = (it.ang * Math.PI) / 180, cs = Math.abs(Math.cos(th)), sn = Math.abs(Math.sin(th));
@@ -5460,10 +5526,37 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   // 原文の行の形どおりに並べる：行の数・位置・長さを原文と同じにして、訳を行の長さに合わせて分ける
   function layoutShape(b, tr, minSize) {
     let lb;
-    try { lb = JSON.parse(b.dataset.lb || 'null'); } catch (e) { return false; }
-    if (!Array.isArray(lb) || lb.length < 3) return false;
+    try { lb = JSON.parse(b.dataset.lb || 'null'); } catch (e) { b.dataset.why = '形✕行データ'; return false; }
+    if (!Array.isArray(lb) || lb.length < 3) { b.dataset.why = '形✕行が少ない'; return false; }
     const W = b.clientWidth, H = b.clientHeight;
-    if (!W || !H || [...tr].length < lb.length) return false;
+    if (!W || !H) { b.dataset.why = '形✕字が少ない'; return false; }
+    const pic = isPicture(b);
+    // ほかの項目の行（別に訳された赤い1行など）が混ざっていたら外す：まわりと全く違う色で、訳にもその色の部分がない行
+    {
+      let rr = []; try { rr = JSON.parse(b.dataset.cr || '[]').filter((r) => r[2]); } catch (e) { rr = []; }
+      const hx = (h) => [1, 3, 5].map((i) => parseInt(String(h).substr(i, 2), 16) || 0);
+      const dst = (a, c) => { const x = hx(a), y = hx(c); return Math.abs(x[0] - y[0]) + Math.abs(x[1] - y[1]) + Math.abs(x[2] - y[2]); };
+      const cnt = {}; lb.forEach((bx) => { if (bx.c) cnt[bx.c] = (cnt[bx.c] || 0) + 1; });
+      const main = Object.keys(cnt).sort((a, c) => cnt[c] - cnt[a])[0];
+      if (main) {
+        // 外すのは、赤など色のはっきりした行だけ（黒・灰色の違いは、字で絵を描いている行でよくあるので外さない）。しかも、はじめか終わりの行だけ
+        const vivid = (h) => { const c = hx(h); return Math.max(...c) - Math.min(...c) >= 80; };
+        const keep = lb.map((bx) => !bx.c || !vivid(bx.c) || dst(bx.c, main) < 170 || rr.some((r) => dst(bx.c, r[2]) < 170));
+        for (let i = 1; i < keep.length - 1; i++) if (!keep[i] && keep.slice(0, i).some(Boolean) && keep.slice(i + 1).some(Boolean)) keep[i] = true;
+        if (keep.some((k) => !k) && keep.filter(Boolean).length >= 3) {
+          let prof0 = null; try { prof0 = JSON.parse(b.dataset.lp || 'null'); } catch (e) { prof0 = null; }
+          if (prof0 && Array.isArray(prof0.lp)) { prof0.lp = prof0.lp.filter((_, i) => keep[i]); b.dataset.lp = JSON.stringify(prof0); }
+          lb = lb.filter((_, i) => keep[i]);
+          b.dataset.lb = JSON.stringify(lb);
+        }
+      }
+    }
+    if ([...tr].length < lb.length) { b.dataset.why = '形✕字が少ない'; return false; }
+    // 字で絵を描いている文（原文は字が升目のように並んでいる）：行の左右をそろえて、升目のように並べる
+    if (pic) {
+      const x0 = Math.min(...lb.map((bx) => bx.x)), x1 = Math.max(...lb.map((bx) => bx.x + bx.w));
+      lb = lb.map((bx) => (bx.w >= (x1 - x0) * 0.6 ? Object.assign({}, bx, { x: x0, w: x1 - x0 }) : bx));
+    }
     // 色の違う部分（最後だけ赤字など）は、原文と同じく自分の行に置く
     const segs = colorSegments(b, tr);
     let plan = [{ text: tr, boxes: lb }];
@@ -5472,6 +5565,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     const hex = (h) => [1, 3, 5].map((i) => parseInt(h.substr(i, 2), 16));
     const near = (a, c) => { const x = hex(a), y = hex(c); return Math.abs(x[0] - y[0]) + Math.abs(x[1] - y[1]) + Math.abs(x[2] - y[2]) < 170; };
     runs = runs.filter((r) => r[2]);
+    const lbAll = lb;
     const lineCol = lb.map((bx) => (bx.c && runs.some((r) => near(bx.c, r[2])) ? 'c' : 'b'));
     const segCol = segs.map((sg) => { const i = tr.indexOf(sg); const plainI = (b.dataset.tr || '').indexOf(sg.slice(0, 4)); return runs.some((r) => plainI >= r[0] - 1 && plainI < r[1]) ? 'c' : 'b'; });
     let byColor = null;
@@ -5496,29 +5590,29 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
       let used = 0, acc = 0;
       pl.boxes.forEach((bx, i) => {
         acc += bx.w;
-        let e = i === pl.boxes.length - 1 ? cs.length : Math.max(used, Math.round((cs.length * acc) / tw));
+        let e = i === pl.boxes.length - 1 ? cs.length : Math.max(used, Math.round(pic ? (cs.length * (i + 1)) / pl.boxes.length : (cs.length * acc) / tw));
         while (e < cs.length && e > used && /[、。，．,.!！?？…‥ー」』）)】〉》]/.test(cs[e])) e++; // 句読点で行を始めない
         const ln = cs.slice(used, e).join('');
         used = e;
         if (ln) { lines.push(ln); boxes.push(bx); }
       });
     }
-    if (!lines.length) return false;
+    if (!lines.length) { b.dataset.why = '形✕並べられない'; return false; }
     // どの行も原文の行の幅に収まる大きさ（全部の行で同じ大きさ）
     let size = Infinity;
     lines.forEach((ln, i) => { size = Math.min(size, (boxes[i].w * W) / Math.max(1, [...ln].length), boxes[i].h * H * 0.95); });
-    if (!isFinite(size) || size < 5) return false;
-    if (minSize && size * (S.textScale || 100) / 100 < minSize) return false; // 形どおりだと小さすぎて読みにくい
+    if (!isFinite(size) || size < 5) { b.dataset.why = '形✕字が5px未満'; return false; }
+    if (minSize && size * (S.textScale || 100) / 100 < minSize) { b.dataset.why = '形✕小さい ' + Math.round(size) + '/' + Math.round(minSize) + 'px'; return false; } // 形どおりだと小さすぎて読みにくい
     paintRuns(b, lines, boxes);
     // 字が行の幅をほぼ埋める行だけ、両端までそろえる
-    { const box = b.querySelector('.ezc-t'); [...(box ? box.children : [])].forEach((div, li) => { const n = +div.dataset.n || 1; if (n > 1 && n * size >= boxes[li].w * W * 0.8) div.style.justifyContent = 'space-between'; }); }
+    { const box = b.querySelector('.ezc-t'); [...(box ? box.children : [])].forEach((div, li) => { const n = +div.dataset.n || 1; if (n > 1 && n * size >= boxes[li].w * W * (pic ? 0.5 : 0.8)) div.style.justifyContent = 'space-between'; }); }
     // 原文の行の同じ場所の色で塗る（灰色の文の中の黒い字で縄を描いている、などの絵をそのまま写す）
     let prof = null;
     try { prof = JSON.parse(b.dataset.lp || 'null'); } catch (e) { prof = null; }
     if (prof && Array.isArray(prof.lp) && prof.pal) {
       const box = b.querySelector('.ezc-t');
       [...(box ? box.children : [])].forEach((div, li) => {
-        const bi = lb.indexOf(boxes[li]);
+        const bi = lbAll.indexOf(boxes[li]);
         const row = prof.lp[bi];
         if (!row) return;
         const sp = [...div.children], n = sp.length;
@@ -5533,6 +5627,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     }
     b.style.whiteSpace = 'nowrap';
     b.style.fontSize = (size * (S.textScale || 100) / 100).toFixed(2) + 'px';
+    b.dataset.why = '形○ ' + lb.length + '行' + (prof && prof.lp ? '・色' : '');
     return true;
   }
 
@@ -5595,6 +5690,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     const size = Math.max(6, Math.min(best.size * fill, cap, origSize(b)) * (S.textScale || 100) / 100);
     // 原文の行の形どおりに並べられるなら、そうする。ただし字がふつうの並べ方の7割より小さくなるときは読みやすさを優先
     // 行の中で色が混ざっている（灰色の文の中の黒い字で縄を描く、など）ときは、絵が大事なので少し小さくなっても形を優先する
+    if (!b.dataset.lb && b.dataset.kind !== 'speech') b.dataset.why = '形✕行の位置なし';
     if (b.dataset.lb && layoutShape(b, tr, size * (isPicture(b) ? 0.5 : 0.7))) return;
     paintRuns(b, best.lines);
     b.style.whiteSpace = 'nowrap';
@@ -5697,6 +5793,16 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     return { x: q.x, w: q.w, y, h: q.h * nH / H };
   }
   const score = (q, hpx) => (q.src || '').replace(/\s/g, '').length * 1000 + q.w * q.h * hpx;
+  // 原文が同じ文か（片方がもう片方に含まれる・半分以上の2文字の並びが同じ）。原文がないときは同じとみなす（前と同じ動き）
+  function sameText(a, b) {
+    const n = (t) => String(t || '').replace(/[\s.,!?！？。、…~～\-—"'“”‘’]/g, '');
+    const x = n(a), y = n(b);
+    if (!x || !y) return true;
+    if (x.includes(y) || y.includes(x)) return true;
+    const bg = (t) => { const s2 = new Set(); for (let i = 0; i < t.length - 1; i++) s2.add(t.slice(i, i + 2)); return s2; };
+    const A = bg(x), B = bg(y); let k = 0; for (const g of A) if (B.has(g)) k++;
+    return k >= Math.min(A.size, B.size) * 0.5;
+  }
   function overlapFrac(a, b) {
     const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
     const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
@@ -5716,6 +5822,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
         for (const q of theirs) {
           const qm = toMine(img, nImg, side, q);
           if (overlapFrac(it, qm) < 0.3) continue;
+          if (!sameText(it.src, q.src)) continue; // 場所が重なっていても、別の文（大きな文の中の赤い1行など）は両方残す
           // 同じ文字：完全な方を残す
           if (score(it, img.naturalHeight) >= score(qm, img.naturalHeight)) {
             theirs = theirs.filter((x) => x !== q); changedTheirs = true;
@@ -6438,6 +6545,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     <button class="pri" id="save">保存</button>
     <button id="redo">この画面を訳し直す</button>
     <button id="redoAll">この話を全部訳し直す</button>
+    <button id="pclr">この話の保存した訳を消す</button>
     <button id="clr">保存した訳を全部消す</button>
     <button id="close">閉じる</button>
   </div>
@@ -6472,6 +6580,19 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     },
     setOn: () => setOn(),
     illust: (v) => illust(v),
+    // この話（このページ）の画像の保存した訳を消す。ほかの話・作品の訳は残す
+    clearPage: () => {
+      const keys = new Set();
+      for (const k of [pageKey(), oldPageKey()]) {
+        const p = store.get(k, null);
+        if (p && p.idx) Object.values(p.idx).forEach((e) => { if (e && e.key) keys.add(e.key); });
+        del(k);
+      }
+      allImgs().forEach((img) => { const k = imgKeyMap.get(img); if (k) keys.add(k); });
+      for (const k of keys) { del('ezc_c:' + k); del('ezc_e:' + k); del('ezc_t:' + k); }
+      setIdx(getIdx().filter((k) => !keys.has(k)), true);
+      return keys.size;
+    },
     // 画面に出ている挿絵のうち、まだ訳を表示していない（または訳している最中の）枚数
     visibleIllustKey: () => { const vh = innerHeight; return allImgs().filter((i) => { const r = rectOf(i); return r.bottom > 0 && r.top < vh && eligible(i); }).map((i) => imgIndex(i) + ':' + hash(String(i.currentSrc || i.src))).join(','); }, // アドレス全体で見分ける（末尾だけだと同じになることがある）
     // 画面に出ている挿絵のうち、訳を表示しているもの
@@ -6603,9 +6724,17 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   $('close').onclick = () => ($('sheet').hidden = true);
   // 動かしている間もその場で大きさを確認できる
   $('ts').oninput = () => { $('tsv').textContent = $('ts').value; S.textScale = +$('ts').value; overlays.forEach((ov) => { ov.dataset.fitted = '0'; fitAll(ov); }); };
+  $('pclr').onclick = () => {
+    if (!confirm('この話の画像（挿絵）の保存した訳を消す？（ほかの話・クラウドのバックアップは残る）')) return;
+    const n = wtApi.clearPage();
+    toast(`この話の保存した訳を消した（${n}枚分）。ページを読み直します`);
+    setTimeout(() => location.reload(), 900);
+  };
   $('clr').onclick = () => {
     if (!confirm('全作品の保存した訳を全部消す？（クラウドのバックアップは残る）')) return;
-    cacheClear(); toast('保存した訳を全部消した');
+    cacheClear(); toast('保存した訳を全部消した。ページを読み直します');
+    // 画面に出ている訳や、覚えている訳が残らないように読み直す
+    setTimeout(() => location.reload(), 900);
   };
   const saveGist = () => { S.gistToken = $('gt').value.trim(); S.autoBackup = $('ab').checked; saveS(); };
   $('cs').onclick = () => { saveGist(); backupNow(true); };
