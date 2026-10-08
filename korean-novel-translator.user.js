@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.69
+// @version      10.5.73
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -44,8 +44,437 @@
 // ==/UserScript==
 
 const KZ_SET = GM_setValue;
+const KZ_MENU = typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : () => {};
+const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
 (function () {
   'use strict';
+  // ---------- 英語版・中国語版（画面の文字と訳す言語）----------
+  // 日本語のときは何も変えない：trUI・trHTML はそのまま返し、ほかの英語・中国語用の分かれ道も通らない
+  // はじめて入れた人（設定がまだない）だけ、ブラウザの言語で決める（中国語→中国語、日本語以外→英語）。今まで使っている人は日本語のまま
+  const OUT_LANG = (() => {
+    try {
+      const c = GM_getValue('cfg', null);
+      if (c && typeof c === 'object' && Object.keys(c).length) return c.outLang === 'en' || c.outLang === 'zh' ? c.outLang : 'ja';
+      const nl = String((navigator.languages && navigator.languages[0]) || navigator.language || 'ja');
+      return /^ja\b/i.test(nl) ? 'ja' : /^zh\b/i.test(nl) ? 'zh' : 'en';
+    } catch { return 'ja'; }
+  })();
+  const OUT_EN = OUT_LANG === 'en', OUT_ZH = OUT_LANG === 'zh', OUT_X = OUT_LANG !== 'ja';
+  // 訳文のコピー・HTML保存・ZIP保存：配布版では使えない（訳文の再配布などの悪用を防ぐため）
+  const EXPORT_OK = false;
+  const EN_MAP = {
+    // ボタン・パネル
+    '閉じる': 'Close', '再翻訳': 'Retranslate', 'コピー': 'Copy', '設定': 'Settings', '作品ごとに保存': 'Save by work',
+    '小説': 'Novel', '翻訳エンジン': 'Translation engine', '表示方法': 'Display', '元のページに上書き（サイトの見た目のまま）': 'Replace text on the page (keeps the site layout)',
+    '別画面で読む': 'Read in a separate panel', '原文の言語（自動なら本文の文字から判定）': 'Source language (Auto detects from the text)',
+    '自動': 'Auto', '韓国語': 'Korean', '中国語': 'Chinese', '英語': 'English', 'エンジン': 'Engine', 'OpenAI互換（DeepSeekなど）': 'OpenAI-compatible (DeepSeek etc.)',
+    'APIキー（エンジンごとに保存）': 'API key (saved per engine)', 'モデル名（空欄で既定）': 'Model name (blank = default)', '一覧から選ぶ': 'Pick from list',
+    '（選ぶとモデル名に入ります）': '(pick to fill the model name)', '（選ぶとモデル名に入ります・取得済み）': '(pick to fill the model name · loaded)',
+    '予備モデル（混雑時に順番に切り替え。カンマ区切り、空欄で既定）': 'Fallback models (used in order when busy; comma-separated, blank = default)',
+    '表示と送り方': 'Display & sending', '文の中の小さな画像（絵文字・アイコン）の代わりに入れる文字（空欄なら画像のまま）': 'Text to use for small inline images (emoji/icons) (blank = keep images)',
+    '例：😄': 'e.g. 😄', '挿絵の中の文字も訳す（「訳」を押したとき。Geminiのキーを使い、挿絵1枚ごとに料金）': 'Also translate text inside illustrations (when you press TL; uses your Gemini key, billed per image)',
+    '開いたページに合わせて小説／WTモードを自動で切り替える': 'Switch between Novel / WT mode automatically for each page',
+    '訳文の漢字を日本の字形で表示（韓国風の漢字に違和感があるとき）': 'Show kanji in Japanese glyph style (Japanese output only)',
+    '成人向け表現のブロックを外す（Geminiのみ）': 'Turn off blocking of adult content (Gemini only)', 'ベースURL（OpenAI互換のみ）': 'Base URL (OpenAI-compatible only)',
+    '冒頭を先に表示する（オフにすると1話を1回で送れて安くなるが、表示まで待つ）': 'Show the beginning first (off = send a whole chapter at once; cheaper but you wait longer)',
+    '同時に送る数（1で順番に。多いほど速いが回数制限に当たりやすい）': 'Parallel requests (1 = one at a time; more is faster but hits rate limits)',
+    '1回に送る文字数': 'Characters per request', '用語・作品メモ': 'Glossary & notes', '用語集（1行に「原語=訳語」）': 'Glossary (one "original=translation" per line)',
+    '作品メモを自動で作る（人物・一人称・口調を話をまたいで統一）': 'Build work notes automatically (keeps names, pronouns and tone consistent across chapters)',
+    '作品メモの更新に使うモデル（空欄で既定。ClaudeはHaikuで安く）': 'Model for updating notes (blank = default; Claude uses Haiku to save cost)',
+    'この作品のメモ': 'Notes for this work', '（自動更新・手で直してもOK。作品のページで開いたときに表示）': '(updated automatically; you can edit it. Shown when opened on a page of the work)',
+    '追加の指示（1行に1つ。作品ごとに書き分けてOK）': 'Extra instructions (one per line; can be per work)',
+    '例：『作品名』主人公ソン・ユハン（男）の一人称は地の文・台詞とも「俺」': 'e.g. In "Title", the protagonist Song Yuhan (male) speaks casually and bluntly',
+    '保存': 'Save', '戻る': 'Back', '記録の引っ越し・バックアップ': 'Move / back up your data', '訳の記録（ほかの端末へ移すとき。APIキーは含まれません）': 'Translation records (to move to another device; API keys are not included)',
+    '記録を書き出す': 'Export records', '記録を読み込む': 'Import records',
+    'クラウドに自動バックアップ（GitHubのトークン。gist の権限だけでOK。スマホを無くしても別の端末で戻せます）': 'Automatic cloud backup (GitHub token with gist permission only; restore on another device even if you lose your phone)',
+    '訳すたびに自動でクラウドへ保存（最後の変更から1分後）': 'Save to the cloud automatically after translating (1 minute after the last change)',
+    '今すぐクラウドに保存': 'Save to cloud now', 'クラウドから戻す': 'Restore from cloud', '訳を消す': 'Delete translations',
+    'この話の訳を消す': 'Delete this chapter\'s translation', '小説の訳を全部消す': 'Delete all novel translations',
+    '漫画・ウェブトゥーンの吹き出しを読み取って、訳を吹き出しの上に重ねます。WTモードでは「WT」ボタンを押すと、そのページの翻訳が始まります（訳したことのある画像は、押さなくても最初から表示）。': 'Reads the speech bubbles of comics/webtoons and lays the translation over them. In WT mode, press the WT button to translate the page (images translated before are shown without pressing).',
+    'Gemini APIキー（空欄なら小説と同じキー）': 'Gemini API key (blank = same key as Novel)', 'モデル（混雑時は左から順に切り替え。カンマ区切り）': 'Models (switched left to right when busy; comma-separated)',
+    '訳す言語': 'Target language', '同時に送る数（多いほど速いが回数制限に当たりやすい）': 'Parallel requests (more is faster but hits rate limits)',
+    '縦書き': 'Vertical text', '縦長の吹き出しは縦書き': 'Vertical in tall bubbles', '常に横書き': 'Always horizontal', '文字の大きさ：': 'Text size: ',
+    '絵の上の文字の隠し方': 'How to hide text on the art', '文字の形だけ消す（絵が残る）': 'Erase only the letters (keeps the art)', '白い札で隠す（読みやすい）': 'Cover with white labels (easier to read)',
+    'セリフの文字': 'Dialogue font', '漫画風（かなは明朝・漢字はゴシック）': 'Comic style', 'ゴシック（原文に近い）': 'Sans (close to the original)', '丸ゴシック（やわらかい）': 'Rounded (soft)',
+    '効果音も訳す': 'Also translate sound effects', '無視する小さい画像（px未満）': 'Ignore small images (under px)',
+    '確認モード（読んだ画像をピンクの点線、見つけた文字を青枠で表示）': 'Debug mode (pink dashed line = images read, blue box = text found)',
+    '全作品共通の固定訳（1行に「原語=訳語」）': 'Fixed translations for all works (one "original=translation" per line)', '訳した内容から作品メモを自動で更新': 'Update work notes automatically from translations',
+    '（人物の訳名・性別・一人称・口調、用語）': '(character names, gender, pronouns, tone, terms)', 'これまでのあらすじ（自動。直してもOK）': 'Story so far (automatic; you can edit it)',
+    '今すぐメモを更新': 'Update notes now', 'この作品を書き出す': 'Export this work', 'この作品の記録を消す': 'Delete this work\'s records', '訳し直し': 'Retranslate',
+    'この画面を訳し直す': 'Retranslate this screen', 'この話を全部訳し直す': 'Retranslate the whole chapter',
+    'クラウドに自動バックアップ（GitHubのトークン。空欄なら小説と同じ）': 'Automatic cloud backup (GitHub token; blank = same as Novel)', '訳が増えたら自動でクラウドへ保存': 'Save to the cloud automatically when translations are added',
+    'この話の保存した訳を消す': 'Delete saved translations for this chapter', '保存したWTの訳を全部消す': 'Delete all saved WT translations',
+    '☕ 作者を応援する（OFUSE）': '☕ Support the author (OFUSE)', 'このスクリプトは無料です。気に入ったら応援してもらえるとうれしいです': 'This script is free. If you like it, your support is appreciated!',
+    '訳したページを保存': 'Save the translated page', '訳文をコピー': 'Copy translation', 'この話を翻訳（ドラッグで移動）': 'Translate this chapter (drag to move)', '翻訳パネル': 'Translation panel',
+    '保': 'Save', '写': 'Copy', '訳': 'TL', '原': 'RAW', '原文に戻す': 'Back to original', 'この画面を翻訳': 'Translate this screen', 'この話を翻訳': 'Translate this chapter',
+    '表示・翻訳の言語 / Language': 'Language / 表示・翻訳の言語',
+    'なし': 'none', '翻訳と同じモデル': 'same model as translation', '（名前なし）': '(no title)',
+    // WTの小さな設定画面
+    '吹き出し翻訳（WT）': 'Bubble translation (WT)', 'まんが吹き出し翻訳': 'Comic bubble translation', 'Gemini APIキー（空欄なら小説翻訳の設定のキーを使う）': 'Gemini API key (blank = use the Novel key)',
+    'モデル（混雑時は左から順に切り替え）': 'Models (switched left to right when busy)', '全作品共通の固定訳（1行に1つ）': 'Fixed translations for all works (one per line)',
+    '同時に送る数（多いほど速い。無料枠だと回数制限に当たりやすい）': 'Parallel requests (more is faster; free tier hits rate limits easily)', 'この作品': 'This work',
+    '翻訳メモ（人物の訳名・性別・一人称・口調、用語。作品ごと）': 'Translation notes (character names, gender, pronouns, tone, terms; per work)', '訳した内容からメモを自動で更新': 'Update notes automatically from translations',
+    '訳の記録・バックアップ（全作品）': 'Records & backup (all works)', 'クラウドに自動バックアップ（GitHubのトークン。空欄なら小説翻訳の設定のトークンを使う）': 'Automatic cloud backup (GitHub token; blank = use the Novel token)',
+    '訳が増えたら自動でクラウドに保存': 'Save to the cloud automatically when translations are added', 'クラウドに保存': 'Save to cloud', 'ファイルに書き出す': 'Export to file', 'ファイルを読み込む': 'Import file',
+    'ボタンのタップ＝このサイトで翻訳ON/OFF、長押し＝この画面、ドラッグ＝移動。訳をタップすると原文が見える。': 'Tap the button = translation ON/OFF, long press = settings, drag = move. Tap a translation to see the original.',
+    '保存した訳を全部消す': 'Delete all saved translations',
+    // メニュー
+    '設定を開く': 'Open settings', 'この話を翻訳し直す（上書き表示）': 'Retranslate this chapter', '訳したページをHTMLで保存': 'Save translated page as HTML', 'ボタンの位置をリセット': 'Reset button position',
+    '下まで読み込んでから翻訳（本文が途中までしか訳されないとき）': 'Load to the end, then translate (if only part is translated)', '本文エリアを手動で選ぶ': 'Pick the text area manually',
+    'このサイトでボタンを常に表示（切り替え）': 'Always show the button on this site (toggle)', 'このサイトではボタンを出さない（切り替え）': 'Hide the button on this site (toggle)',
+    '診断（ボタンが出ないとき）': 'Diagnose (if the button does not appear)', '本文エリア設定をリセット': 'Reset text area setting',
+    'この話の並びを記録し直す（話が書き直されたとき・訳は残す）': 'Re-record this chapter\'s order (if it was rewritten; keeps translations)',
+    'この作品の「前の話の続き」をリセット': 'Reset "previous chapter" context for this work', '訳の記録を書き出す（ほかの端末へ）': 'Export records (to another device)',
+    'エンジンを切り替え（Claude ⇄ Gemini）': 'Switch engine (Claude ⇄ Gemini)', '原文の言語を切り替え（自動→韓→中→英）': 'Switch source language (Auto→KO→ZH→EN)',
+    '作品ごとに全話まとめて保存（ZIP）': 'Save all chapters of a work (ZIP)', 'クラウドに今すぐ保存': 'Save to cloud now',
+    'WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）': 'Use WT (comics/webtoon) translation on this site (toggle)', '保存済みの訳を全削除': 'Delete all saved translations',
+    // お知らせ
+    'この話の訳がまだありません': 'No translation for this chapter yet', '先にこの話を「訳」で翻訳してください': 'Translate this chapter with TL first',
+    'この話をHTMLファイルで保存しました（ダウンロードを確認してください）': 'Saved this chapter as an HTML file (check your downloads)',
+    '本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」を使ってください': 'Text not found. Use "Pick the text area manually" in the extension menu',
+    '本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」か「診断」を使ってください': 'Text not found. Use "Pick the text area manually" or "Diagnose" in the extension menu',
+    'APIキーを設定してください': 'Please set your API key', '原文に戻しました': 'Back to the original', '今の画面に訳せる文が見つかりません': 'No text to translate on this screen',
+    'まだ訳した文がありません': 'Nothing translated yet', 'この作品の控えがまだありません。訳した話を一度開いて「訳」を押すと控えられます': 'No saved chapters for this work yet. Open a translated chapter and press TL to save it',
+    '作品を選ぶと、訳した話をまとめてZIPで保存します': 'Pick a work to save its translated chapters as a ZIP', 'まだ控えた話がありません': 'No saved chapters yet',
+    '保存済みの訳を表示中（段落ごとの記録から）': 'Showing saved translation (from paragraph records)', '設定でGitHubのトークンを入れてください': 'Enter your GitHub token in Settings',
+    'クラウドに保存中です': 'Saving to the cloud…', 'クラウドにバックアップが見つかりません': 'No backup found in the cloud',
+    '読み込めません：ファイルの形式が違います': 'Cannot import: wrong file format', '読み込めません：このスクリプトの書き出しファイルではありません': 'Cannot import: not an export file of this script',
+    'このページではWTの設定を変えられません（ページの中の小さな画面のため）': 'WT settings cannot be changed here (this is a frame inside the page)',
+    'WTの設定を保存しました': 'WT settings saved', 'WTの設定を反映しました': 'WT settings applied', '設定を保存しました': 'Settings saved',
+    'このサイトでは常にボタンを表示します': 'The button will always be shown on this site', '自動に戻しました': 'Back to automatic',
+    'このサイトではボタンを出しません（メニューの「設定を開く」などはそのまま使えます）': 'The button is hidden on this site (menu items like "Open settings" still work)',
+    'このサイトでもボタンを出すように戻しました': 'The button will be shown on this site again', 'リセットしました': 'Reset', 'この話の記録はまだありません': 'No records for this chapter yet',
+    'この話の「場面と行の並び」だけを消します。訳そのものは残るので、もう一度「訳」を押しながら読めば、変わっていない文は料金なしで出ます。よろしいですか？': 'This deletes only the scene/line order of this chapter. Translations are kept, so unchanged lines appear for free when you read with TL again. Continue?',
+    '並びをリセットしました。最初から「訳」を押しながら読み進めてください': 'Order reset. Read from the start while pressing TL',
+    'リセットしました（人物・用語メモはそのまま）': 'Reset (character/term notes are kept)', 'この話の訳（本文と挿絵）を消します。よろしいですか？': 'Delete this chapter\'s translation (text and illustrations)?',
+    'この端末に保存した小説の訳を全部消します（作品メモ・設定は残ります）。元に戻せません。よろしいですか？': 'Delete all novel translations saved on this device (notes and settings are kept)? This cannot be undone.',
+    'WTモードにしました。ページを開き直してください': 'Switched to WT mode. Please reload the page', 'WTモード': 'WT mode', '小説モード': 'Novel mode',
+    'このサイトはWTモードにしました（WTボタンを押すと翻訳）': 'This site is now in WT mode (press WT to translate)', 'このサイトは小説モードにしました': 'This site is now in Novel mode',
+    'APIキーを入れてね': 'Please enter your API key', 'メモに足す新しいセリフがまだない': 'No new lines to add to the notes yet', '翻訳メモを更新中…': 'Updating translation notes…',
+    '翻訳メモを更新した': 'Translation notes updated', '設定でGitHubのトークンを入れてね': 'Enter your GitHub token in Settings', 'クラウドに保存中': 'Saving to the cloud…',
+    'クラウドにバックアップが見つからない': 'No backup found in the cloud', '読み込めない：ファイルの形式が違う': 'Cannot import: wrong file format',
+    '読み込めない：このスクリプトの書き出しファイルじゃない': 'Cannot import: not an export file of this script', 'APIキー未設定（WTボタン長押しで設定）': 'No API key (long-press WT to open settings)',
+    'モデル未設定': 'No model set', '回数制限のため待機中…': 'Waiting for rate limit…', '翻訳待ち…': 'Waiting…', '翻訳中…': 'Translating…', '止めました': 'Stopped',
+    '原文に戻した': 'Back to the original', '先にGeminiのAPIキーを入れてね': 'Enter your Gemini API key first', 'このページを翻訳する': 'Translating this page',
+    '保存した': 'Saved', 'この話の画像（挿絵）の保存した訳を消す？（ほかの話・クラウドのバックアップは残る）': 'Delete saved translations for this chapter\'s images? (other chapters and cloud backup are kept)',
+    '全作品の保存した訳を全部消す？（クラウドのバックアップは残る）': 'Delete all saved translations for all works? (cloud backup is kept)', '保存した訳を全部消した。ページを読み直します': 'All saved translations deleted. Reloading the page',
+    '通信エラー': 'Network error', 'タイムアウト': 'Timed out', '時間切れ': 'Timed out', '画像のデコード失敗': 'Could not decode the image', '画像を読めません': 'Cannot read the image',
+    '画像を読めません（サイトの保護）': 'Cannot read the image (site protection)', '使えるモデルがありません。設定のモデル名を確認してください': 'No usable model. Check the model name in Settings',
+    'まだ一度も更新されていない': 'never updated yet', '空の返事': 'empty response',
+    '例：\n김독자=キム・ドクシャ\n도깨비=トッケビ': 'e.g.\n김독자=Kim Dokja\n도깨비=Dokkaebi', '例：\n김독자=キム・ドクチャ': 'e.g.\n김독자=Kim Dokja',
+    '김독자=キム・ドクチャ｜男｜俺｜ぶっきらぼう': '김독자=Kim Dokja｜male｜blunt', '김독자 = キム・ドクチャ\n유중혁 = ユ・ジュンヒョク': '김독자 = Kim Dokja\n유중혁 = Yoo Joonghyuk',
+    '（今開いている作品）': '(current work)', 'サイトの保護': 'site protection',
+  };
+  const ZH_MAP = {
+    "閉じる": "关闭",
+    "再翻訳": "重新翻译",
+    "コピー": "复制",
+    "設定": "设置",
+    "作品ごとに保存": "按作品保存",
+    "小説": "小说",
+    "翻訳エンジン": "翻译引擎",
+    "表示方法": "显示方式",
+    "元のページに上書き（サイトの見た目のまま）": "直接替换页面文字（保持网站原样）",
+    "別画面で読む": "在单独面板中阅读",
+    "原文の言語（自動なら本文の文字から判定）": "原文语言（自动=根据正文判断）",
+    "自動": "自动",
+    "韓国語": "韩语",
+    "中国語": "中文",
+    "英語": "英语",
+    "エンジン": "引擎",
+    "OpenAI互換（DeepSeekなど）": "OpenAI兼容（DeepSeek等）",
+    "APIキー（エンジンごとに保存）": "API密钥（按引擎分别保存）",
+    "モデル名（空欄で既定）": "模型名（留空=默认）",
+    "一覧から選ぶ": "从列表选择",
+    "（選ぶとモデル名に入ります）": "（选择后填入模型名）",
+    "（選ぶとモデル名に入ります・取得済み）": "（选择后填入模型名、已获取）",
+    "予備モデル（混雑時に順番に切り替え。カンマ区切り、空欄で既定）": "备用模型（繁忙时依次切换。逗号分隔，留空=默认）",
+    "表示と送り方": "显示与发送",
+    "文の中の小さな画像（絵文字・アイコン）の代わりに入れる文字（空欄なら画像のまま）": "用来代替正文中小图片（表情、图标）的文字（留空=保留图片）",
+    "例：😄": "例：😄",
+    "挿絵の中の文字も訳す（「訳」を押したとき。Geminiのキーを使い、挿絵1枚ごとに料金）": "同时翻译插图中的文字（按“译”时。使用Gemini密钥，每张插图计费）",
+    "開いたページに合わせて小説／WTモードを自動で切り替える": "根据打开的页面自动切换小说／WT模式",
+    "訳文の漢字を日本の字形で表示（韓国風の漢字に違和感があるとき）": "译文汉字使用日本字形（仅日语译文）",
+    "成人向け表現のブロックを外す（Geminiのみ）": "解除成人内容的屏蔽（仅Gemini）",
+    "ベースURL（OpenAI互換のみ）": "Base URL（仅OpenAI兼容）",
+    "冒頭を先に表示する（オフにすると1話を1回で送れて安くなるが、表示まで待つ）": "先显示开头部分（关闭后整章一次发送，更便宜但要等更久）",
+    "同時に送る数（1で順番に。多いほど速いが回数制限に当たりやすい）": "同时发送数（1=依次发送。越多越快，但容易触发频率限制）",
+    "1回に送る文字数": "每次发送的字数",
+    "用語・作品メモ": "术语、作品笔记",
+    "用語集（1行に「原語=訳語」）": "术语表（每行一个“原文=译文”）",
+    "作品メモを自動で作る（人物・一人称・口調を話をまたいで統一）": "自动生成作品笔记（跨章节统一人名、称呼、语气）",
+    "作品メモの更新に使うモデル（空欄で既定。ClaudeはHaikuで安く）": "更新笔记用的模型（留空=默认。Claude用Haiku更省钱）",
+    "この作品のメモ": "本作品的笔记",
+    "（自動更新・手で直してもOK。作品のページで開いたときに表示）": "（自动更新，也可手动修改。在作品页面打开时显示）",
+    "追加の指示（1行に1つ。作品ごとに書き分けてOK）": "额外指示（每行一条，可按作品分别写）",
+    "例：『作品名』主人公ソン・ユハン（男）の一人称は地の文・台詞とも「俺」": "例：《作品名》主角宋宇翰（男）说话直率、冷淡",
+    "保存": "保存",
+    "戻る": "返回",
+    "記録の引っ越し・バックアップ": "迁移、备份记录",
+    "訳の記録（ほかの端末へ移すとき。APIキーは含まれません）": "翻译记录（迁移到其他设备时使用。不包含API密钥）",
+    "記録を書き出す": "导出记录",
+    "記録を読み込む": "导入记录",
+    "クラウドに自動バックアップ（GitHubのトークン。gist の権限だけでOK。スマホを無くしても別の端末で戻せます）": "自动云端备份（GitHub令牌，只需gist权限。手机丢了也能在其他设备恢复）",
+    "訳すたびに自動でクラウドへ保存（最後の変更から1分後）": "每次翻译后自动保存到云端（最后一次修改1分钟后）",
+    "今すぐクラウドに保存": "立即保存到云端",
+    "クラウドから戻す": "从云端恢复",
+    "訳を消す": "删除译文",
+    "この話の訳を消す": "删除本章译文",
+    "小説の訳を全部消す": "删除全部小说译文",
+    "漫画・ウェブトゥーンの吹き出しを読み取って、訳を吹き出しの上に重ねます。WTモードでは「WT」ボタンを押すと、そのページの翻訳が始まります（訳したことのある画像は、押さなくても最初から表示）。": "读取漫画、条漫的对话框，把译文叠加在对话框上。在WT模式下按“WT”按钮即开始翻译该页（翻译过的图片无需按键也会直接显示）。",
+    "Gemini APIキー（空欄なら小説と同じキー）": "Gemini API密钥（留空=与小说相同）",
+    "モデル（混雑時は左から順に切り替え。カンマ区切り）": "模型（繁忙时从左依次切换。逗号分隔）",
+    "訳す言語": "翻译成的语言",
+    "同時に送る数（多いほど速いが回数制限に当たりやすい）": "同时发送数（越多越快，但容易触发频率限制）",
+    "縦書き": "竖排",
+    "縦長の吹き出しは縦書き": "竖长对话框用竖排",
+    "常に横書き": "始终横排",
+    "文字の大きさ：": "文字大小：",
+    "絵の上の文字の隠し方": "图上文字的遮盖方式",
+    "文字の形だけ消す（絵が残る）": "只擦除文字（保留图画）",
+    "白い札で隠す（読みやすい）": "用白色标签遮住（更易读）",
+    "セリフの文字": "台词字体",
+    "漫画風（かなは明朝・漢字はゴシック）": "漫画风",
+    "ゴシック（原文に近い）": "黑体（接近原文）",
+    "丸ゴシック（やわらかい）": "圆体（柔和）",
+    "効果音も訳す": "同时翻译拟声词",
+    "無視する小さい画像（px未満）": "忽略的小图片（小于px）",
+    "確認モード（読んだ画像をピンクの点線、見つけた文字を青枠で表示）": "检查模式（粉色虚线=读取的图片，蓝框=找到的文字）",
+    "全作品共通の固定訳（1行に「原語=訳語」）": "所有作品通用的固定译名（每行一个“原文=译文”）",
+    "訳した内容から作品メモを自動で更新": "根据译文自动更新作品笔记",
+    "（人物の訳名・性別・一人称・口調、用語）": "（人物译名、性别、称呼、语气、术语）",
+    "これまでのあらすじ（自動。直してもOK）": "前情提要（自动，也可修改）",
+    "今すぐメモを更新": "立即更新笔记",
+    "この作品を書き出す": "导出本作品",
+    "この作品の記録を消す": "删除本作品的记录",
+    "訳し直し": "重新翻译",
+    "この画面を訳し直す": "重新翻译此画面",
+    "この話を全部訳し直す": "重新翻译整章",
+    "クラウドに自動バックアップ（GitHubのトークン。空欄なら小説と同じ）": "自动云端备份（GitHub令牌。留空=与小说相同）",
+    "訳が増えたら自動でクラウドへ保存": "译文增加时自动保存到云端",
+    "この話の保存した訳を消す": "删除本章已保存的译文",
+    "保存したWTの訳を全部消す": "删除全部已保存的WT译文",
+    "☕ 作者を応援する（OFUSE）": "☕ 支持作者（OFUSE）",
+    "このスクリプトは無料です。気に入ったら応援してもらえるとうれしいです": "本脚本免费。如果喜欢，欢迎支持作者",
+    "訳したページを保存": "保存译文页面",
+    "訳文をコピー": "复制译文",
+    "この話を翻訳（ドラッグで移動）": "翻译本章（拖动可移动）",
+    "翻訳パネル": "翻译面板",
+    "保": "存",
+    "写": "复",
+    "訳": "译",
+    "原": "原",
+    "原文に戻す": "恢复原文",
+    "この画面を翻訳": "翻译此画面",
+    "この話を翻訳": "翻译本章",
+    "表示・翻訳の言語 / Language": "语言 / Language / 表示・翻訳の言語",
+    "なし": "无",
+    "翻訳と同じモデル": "与翻译相同的模型",
+    "（名前なし）": "（无标题）",
+    "吹き出し翻訳（WT）": "对话框翻译（WT）",
+    "まんが吹き出し翻訳": "漫画对话框翻译",
+    "Gemini APIキー（空欄なら小説翻訳の設定のキーを使う）": "Gemini API密钥（留空=使用小说翻译设置中的密钥）",
+    "モデル（混雑時は左から順に切り替え）": "模型（繁忙时从左依次切换）",
+    "全作品共通の固定訳（1行に1つ）": "所有作品通用的固定译名（每行一个）",
+    "同時に送る数（多いほど速い。無料枠だと回数制限に当たりやすい）": "同时发送数（越多越快。免费额度容易触发频率限制）",
+    "この作品": "本作品",
+    "翻訳メモ（人物の訳名・性別・一人称・口調、用語。作品ごと）": "翻译笔记（人物译名、性别、称呼、语气、术语。按作品）",
+    "訳した内容からメモを自動で更新": "根据译文自动更新笔记",
+    "訳の記録・バックアップ（全作品）": "翻译记录、备份（全部作品）",
+    "クラウドに自動バックアップ（GitHubのトークン。空欄なら小説翻訳の設定のトークンを使う）": "自动云端备份（GitHub令牌。留空=使用小说翻译设置中的令牌）",
+    "訳が増えたら自動でクラウドに保存": "译文增加时自动保存到云端",
+    "クラウドに保存": "保存到云端",
+    "ファイルに書き出す": "导出到文件",
+    "ファイルを読み込む": "导入文件",
+    "ボタンのタップ＝このサイトで翻訳ON/OFF、長押し＝この画面、ドラッグ＝移動。訳をタップすると原文が見える。": "点按按钮＝本网站翻译开/关，长按＝设置，拖动＝移动。点按译文可查看原文。",
+    "保存した訳を全部消す": "删除全部已保存的译文",
+    "設定を開く": "打开设置",
+    "この話を翻訳し直す（上書き表示）": "重新翻译本章",
+    "訳したページをHTMLで保存": "将译文页面保存为HTML",
+    "ボタンの位置をリセット": "重置按钮位置",
+    "下まで読み込んでから翻訳（本文が途中までしか訳されないとき）": "加载到底部后再翻译（只翻译了一部分时）",
+    "本文エリアを手動で選ぶ": "手动选择正文区域",
+    "このサイトでボタンを常に表示（切り替え）": "在本网站始终显示按钮（切换）",
+    "このサイトではボタンを出さない（切り替え）": "在本网站不显示按钮（切换）",
+    "診断（ボタンが出ないとき）": "诊断（按钮不显示时）",
+    "本文エリア設定をリセット": "重置正文区域设置",
+    "この話の並びを記録し直す（話が書き直されたとき・訳は残す）": "重新记录本章顺序（章节被改写时、保留译文）",
+    "この作品の「前の話の続き」をリセット": "重置本作品的“上一章接续”",
+    "訳の記録を書き出す（ほかの端末へ）": "导出翻译记录（迁移到其他设备）",
+    "エンジンを切り替え（Claude ⇄ Gemini）": "切换引擎（Claude ⇄ Gemini）",
+    "原文の言語を切り替え（自動→韓→中→英）": "切换原文语言（自动→韩→中→英）",
+    "作品ごとに全話まとめて保存（ZIP）": "保存作品全部章节（ZIP）",
+    "クラウドに今すぐ保存": "立即保存到云端",
+    "WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）": "在本网站使用WT（漫画、条漫）翻译（切换）",
+    "保存済みの訳を全削除": "删除全部已保存的译文",
+    "この話の訳がまだありません": "本章还没有译文",
+    "先にこの話を「訳」で翻訳してください": "请先按“译”翻译本章",
+    "この話をHTMLファイルで保存しました（ダウンロードを確認してください）": "已将本章保存为HTML文件（请查看下载）",
+    "本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」を使ってください": "找不到正文。请使用扩展菜单中的“手动选择正文区域”",
+    "本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」か「診断」を使ってください": "找不到正文。请使用扩展菜单中的“手动选择正文区域”或“诊断”",
+    "APIキーを設定してください": "请设置API密钥",
+    "原文に戻しました": "已恢复原文",
+    "今の画面に訳せる文が見つかりません": "当前画面没有可翻译的文字",
+    "まだ訳した文がありません": "还没有翻译过的文字",
+    "この作品の控えがまだありません。訳した話を一度開いて「訳」を押すと控えられます": "本作品还没有保存的章节。打开翻译过的章节并按“译”即可保存",
+    "作品を選ぶと、訳した話をまとめてZIPで保存します": "选择作品后，将翻译过的章节打包为ZIP保存",
+    "まだ控えた話がありません": "还没有保存的章节",
+    "保存済みの訳を表示中（段落ごとの記録から）": "正在显示已保存的译文（来自段落记录）",
+    "設定でGitHubのトークンを入れてください": "请在设置中填入GitHub令牌",
+    "クラウドに保存中です": "正在保存到云端…",
+    "クラウドにバックアップが見つかりません": "云端没有找到备份",
+    "読み込めません：ファイルの形式が違います": "无法导入：文件格式不对",
+    "読み込めません：このスクリプトの書き出しファイルではありません": "无法导入：不是本脚本导出的文件",
+    "このページではWTの設定を変えられません（ページの中の小さな画面のため）": "此处无法更改WT设置（这是页面中的小框架）",
+    "WTの設定を保存しました": "WT设置已保存",
+    "WTの設定を反映しました": "WT设置已应用",
+    "設定を保存しました": "设置已保存",
+    "このサイトでは常にボタンを表示します": "将在本网站始终显示按钮",
+    "自動に戻しました": "已恢复为自动",
+    "このサイトではボタンを出しません（メニューの「設定を開く」などはそのまま使えます）": "本网站不再显示按钮（“打开设置”等菜单仍可使用）",
+    "このサイトでもボタンを出すように戻しました": "本网站已恢复显示按钮",
+    "リセットしました": "已重置",
+    "この話の記録はまだありません": "本章还没有记录",
+    "この話の「場面と行の並び」だけを消します。訳そのものは残るので、もう一度「訳」を押しながら読めば、変わっていない文は料金なしで出ます。よろしいですか？": "只删除本章的“场景与行顺序”。译文会保留，再次一边按“译”一边阅读时，未改动的文字不会再计费。确定吗？",
+    "並びをリセットしました。最初から「訳」を押しながら読み進めてください": "顺序已重置。请从头一边按“译”一边阅读",
+    "リセットしました（人物・用語メモはそのまま）": "已重置（人物、术语笔记保留）",
+    "この話の訳（本文と挿絵）を消します。よろしいですか？": "删除本章的译文（正文和插图）。确定吗？",
+    "この端末に保存した小説の訳を全部消します（作品メモ・設定は残ります）。元に戻せません。よろしいですか？": "删除本设备上保存的全部小说译文（作品笔记、设置保留）。无法恢复。确定吗？",
+    "WTモードにしました。ページを開き直してください": "已切换到WT模式。请重新打开页面",
+    "WTモード": "WT模式",
+    "小説モード": "小说模式",
+    "このサイトはWTモードにしました（WTボタンを押すと翻訳）": "本网站已切换到WT模式（按WT按钮开始翻译）",
+    "このサイトは小説モードにしました": "本网站已切换到小说模式",
+    "APIキーを入れてね": "请填入API密钥",
+    "メモに足す新しいセリフがまだない": "还没有可加入笔记的新台词",
+    "翻訳メモを更新中…": "正在更新翻译笔记…",
+    "翻訳メモを更新した": "翻译笔记已更新",
+    "設定でGitHubのトークンを入れてね": "请在设置中填入GitHub令牌",
+    "クラウドに保存中": "正在保存到云端…",
+    "クラウドにバックアップが見つからない": "云端没有找到备份",
+    "読み込めない：ファイルの形式が違う": "无法导入：文件格式不对",
+    "読み込めない：このスクリプトの書き出しファイルじゃない": "无法导入：不是本脚本导出的文件",
+    "APIキー未設定（WTボタン長押しで設定）": "未设置API密钥（长按WT按钮打开设置）",
+    "モデル未設定": "未设置模型",
+    "回数制限のため待機中…": "等待频率限制…",
+    "翻訳待ち…": "等待翻译…",
+    "翻訳中…": "翻译中…",
+    "止めました": "已停止",
+    "原文に戻した": "已恢复原文",
+    "先にGeminiのAPIキーを入れてね": "请先填入Gemini API密钥",
+    "このページを翻訳する": "正在翻译此页",
+    "保存した": "已保存",
+    "この話の画像（挿絵）の保存した訳を消す？（ほかの話・クラウドのバックアップは残る）": "删除本章图片（插图）已保存的译文？（其他章节、云端备份保留）",
+    "全作品の保存した訳を全部消す？（クラウドのバックアップは残る）": "删除全部作品已保存的译文？（云端备份保留）",
+    "保存した訳を全部消した。ページを読み直します": "已删除全部已保存的译文。正在重新加载页面",
+    "通信エラー": "网络错误",
+    "タイムアウト": "超时",
+    "時間切れ": "超时",
+    "画像のデコード失敗": "无法解码图片",
+    "画像を読めません": "无法读取图片",
+    "画像を読めません（サイトの保護）": "无法读取图片（网站保护）",
+    "使えるモデルがありません。設定のモデル名を確認してください": "没有可用的模型。请检查设置中的模型名",
+    "まだ一度も更新されていない": "还没有更新过",
+    "空の返事": "空回复",
+    "例：\n김독자=キム・ドクシャ\n도깨비=トッケビ": "例：\n김독자=金独子\n도깨비=鬼怪",
+    "例：\n김독자=キム・ドクチャ": "例：\n김독자=金独子",
+    "김독자=キム・ドクチャ｜男｜俺｜ぶっきらぼう": "김독자=金独子｜男｜冷淡",
+    "김독자 = キム・ドクチャ\n유중혁 = ユ・ジュンヒョク": "김독자 = 金独子\n유중혁 = 刘众赫",
+    "（今開いている作品）": "（当前作品）",
+    "サイトの保護": "网站保护",
+  };
+  // 文の中に数などが入るもの：[正規表現, 英語, 中国語]（文字列なら $1…、関数なら組み立て）
+  const TR_PAT = [
+    [/^エラー: ([\s\S]*)$/, (m, a) => 'Error: ' + trUI(a), (m, a) => '错误：' + trUI(a)],
+    [/^失敗：([\s\S]*?)（タップで再試行）$/, (m, a) => 'Failed: ' + trUI(a) + ' (tap to retry)', (m, a) => '失败：' + trUI(a) + '（点按重试）'],
+    [/^通信エラー（([\s\S]*)）$/, 'Network error ($1)', '网络错误（$1）'],
+    [/^応答を読めません \(([\s\S]*)\)$/, 'Could not read the response ($1)', '无法读取响应（$1）'],
+    [/^画像を読み込めませんでした（([\s\S]*)）$/, (m, a) => 'Could not load the image (' + trUI(a) + ')', (m, a) => '无法加载图片（' + trUI(a) + '）'],
+    [/^画像ではなくページが返ってきた（(\d+)）$/, 'A web page came back instead of an image ($1)', '返回的不是图片而是网页（$1）'],
+    [/^クラウド保存に失敗：([\s\S]*)$/, 'Cloud save failed: $1', '云端保存失败：$1'],
+    [/^クラウドから読み込めません：([\s\S]*)$/, 'Cannot read from the cloud: $1', '无法从云端读取：$1'],
+    [/^クラウドから読み込めない：([\s\S]*)$/, 'Cannot read from the cloud: $1', '无法从云端读取：$1'],
+    [/^メモの更新に失敗：([\s\S]*)$/, 'Failed to update notes: $1', '更新笔记失败：$1'],
+    [/^モードの切り替えでエラー：([\s\S]*)$/, 'Error while switching mode: $1', '切换模式时出错：$1'],
+    [/^回数制限中… (\d+)秒後に再試行（(\d+)回目）。頻繁に出るなら「同時に送る数」を減らしてください$/, 'Rate limited… retrying in $1s (attempt $2). If this happens often, lower "Parallel requests"', '触发频率限制…$1秒后重试（第$2次）。经常出现时请减少“同时发送数”'],
+    [/^(全モデル)?混雑中… (\d+)秒後に再試行（(\d+)回目）$/, (m, a, s, n) => (a ? 'All models busy' : 'Busy') + `… retrying in ${s}s (attempt ${n})`, (m, a, s, n) => (a ? '所有模型繁忙' : '繁忙') + `…${s}秒后重试（第${n}次）`],
+    [/^今日の無料枠を使い切りました（(.+)）。明日また使えます$/, 'Free quota for today used up ($1). Available again tomorrow', '今天的免费额度已用完（$1）。明天可再次使用'],
+    [/^訳文をコピーしました（(\d+)字）$/, 'Copied the translation ($1 characters)', '已复制译文（$1字）'],
+    [/^保存済みの(.+?)版の訳を表示中$/, 'Showing saved $1 translation', '正在显示已保存的$1译文'],
+    [/^保存済みの(.+?)版の訳を表示中（(\d+)段落は(.+?)のまま。「再翻訳」で訳し直せます）$/, (m, p, n, l) => `Showing saved ${p} translation (${n} paragraphs still in ${trUI(l)}; use Retranslate)`, (m, p, n, l) => `正在显示已保存的${p}译文（${n}段仍为${trUI(l)}，可用“重新翻译”）`],
+    [/^保存済みの訳を表示中（(\d+)段落は(.+?)のまま([\s\S]*)）$/, (m, n, l, e) => `Showing saved translation (${n} paragraphs still in ${trUI(l)}${e.replace('／エラー: ', ' / error: ')})`, (m, n, l, e) => `正在显示已保存的译文（${n}段仍为${trUI(l)}${e.replace('／エラー: ', '／错误：')}）`],
+    [/^保存済みの訳の(.+?)部分を直しました$/, (m, l) => `Fixed the ${trUI(l)} parts of the saved translation`, (m, l) => `已修正已保存译文中的${trUI(l)}部分`],
+    [/^本文(\d+)字・(\d+)段落 \/ 翻訳中 (\d+) \/ (\d+)$/, '$1 chars · $2 paragraphs / translating $3 / $4', '正文$1字、$2段 / 翻译中 $3 / $4'],
+    [/^完了（(\d+)段落はブロックされ原文のまま）$/, 'Done ($1 paragraphs were blocked and kept original)', '完成（$1段被屏蔽，保留原文）'],
+    [/^完了（(\d+)段落 \/ (\d+)回）$/, 'Done ($1 paragraphs / $2 requests)', '完成（$1段 / $2次）'],
+    [/^完了（(\d+)段落）$/, 'Done ($1 paragraphs)', '完成（$1段）'],
+    [/^完了（([\s\S]*)）$/, (m, a) => 'Done (' + a.split('／').map(trUI).join(' / ') + ')', (m, a) => '完成（' + a.split('／').map(trUI).join('／') + '）'],
+    [/^(\d+)段落はブロックされ原文のまま$/, '$1 paragraphs were blocked and kept original', '$1段被屏蔽，保留原文'],
+    [/^(\d+)段落は(.+?)のまま。「再翻訳」を試してください$/, (m, n, l) => `${n} paragraphs still in ${trUI(l)}. Try Retranslate`, (m, n, l) => `${n}段仍为${trUI(l)}。请试试“重新翻译”`],
+    [/^(.+?)が残った(\d+)段落を自動で訳し直し中…(（2回目）)?$/, (m, l, n, r) => `Retranslating ${n} paragraphs with ${trUI(l)} left…${r ? ' (2nd try)' : ''}`, (m, l, n, r) => `正在自动重译残留${trUI(l)}的${n}段…${r ? '（第2次）' : ''}`],
+    [/^(.+?)が残った(\d+)文を訳し直し中…(（2回目）)?$/, (m, l, n, r) => `Retranslating ${n} lines with ${trUI(l)} left…${r ? ' (2nd try)' : ''}`, (m, l, n, r) => `正在重译残留${trUI(l)}的${n}句…${r ? '（第2次）' : ''}`],
+    [/^本文を読み込み中…（(\d+)）$/, 'Loading text… ($1)', '正在加载正文…（$1）'],
+    [/^翻訳中…（(\d+)段落）$/, 'Translating… ($1 paragraphs)', '翻译中…（$1段）'],
+    [/^翻訳中… (\d+) \/ (\d+)段落$/, 'Translating… $1 / $2 paragraphs', '翻译中… $1 / $2段'],
+    [/^（(\d+)文は未訳）$/, '($1 lines untranslated)', '（$1句未翻译）'],
+    [/^完了（(\d+)文は(.+?)のまま。メニューの「この話を翻訳し直す」で再挑戦できます）$/, (m, n, l) => `Done (${n} lines still in ${trUI(l)}. Use "Retranslate this chapter" in the menu)`, (m, n, l) => `完成（${n}句仍为${trUI(l)}。可用菜单中的“重新翻译本章”再试）`],
+    [/^翻訳完了（この場面 (\d+)文・これまで (\d+)文）$/, 'Translated ($1 lines in this scene · $2 so far)', '翻译完成（本场景$1句，累计$2句）'],
+    [/^(\d+)場面・(\d+)文を保存しました（最後：「([\s\S]*)」）$/, 'Saved $1 scenes · $2 lines (last: "$3")', '已保存$1个场景、$2句（最后：“$3”）'],
+    [/^「(.+)」(\d+)話をまとめて保存しました([\s\S]*)$/, (m, w, n, r) => `Saved ${n} chapters of "${w}"${r.replace(/（(\d+)〜(\d+)話）/, ' (ch. $1–$2)')}`, (m, w, n, r) => `已保存《${w}》${n}章${r.replace(/（(\d+)〜(\d+)話）/, '（第$1〜$2章）')}`],
+    [/^記録にある(\d+)段落はそのまま表示、残り(\d+)段落を翻訳します$/, 'Showing $1 saved paragraphs, translating the remaining $2', '已显示记录中的$1段，翻译剩余$2段'],
+    [/^クラウドに保存しました（(\d+)件）$/, 'Saved to the cloud ($1 items)', '已保存到云端（$1条）'],
+    [/^クラウドに保存した（(\d+)件）$/, 'Saved to the cloud ($1 items)', '已保存到云端（$1条）'],
+    [/^訳の記録と設定を書き出しました（(\d+)件）。APIキーは含まれません$/, 'Exported records and settings ($1 items). API keys are not included', '已导出翻译记录和设置（$1条）。不包含API密钥'],
+    [/^訳の記録と設定を書き出した（(\d+)件）。APIキーは入ってない$/, 'Exported records and settings ($1 items). API keys are not included', '已导出翻译记录和设置（$1条）。不包含API密钥'],
+    [/^訳の記録を読み込みました（(\d+)件(・設定も反映)?）。APIキーは含まれていません$/, (m, n, s) => `Imported records (${n} items${s ? ', settings applied' : ''}). API keys are not included`, (m, n, s) => `已导入翻译记录（${n}条${s ? '，设置也已应用' : ''}）。不包含API密钥`],
+    [/^訳の記録を読み込んだ（(\d+)件(・設定も反映)?）$/, (m, n, s) => `Imported records (${n} items${s ? ', settings applied' : ''})`, (m, n, s) => `已导入翻译记录（${n}条${s ? '，设置也已应用' : ''}）`],
+    [/^この作品のメモ【([\s\S]*)】$/, 'Notes for this work [$1]', '本作品的笔记【$1】'],
+    [/^このタブのまま閉じると、このサイトは(WT|小説)モードになります$/, (m, a) => `Closing on this tab sets this site to ${a === 'WT' ? 'WT' : 'Novel'} mode`, (m, a) => `在此标签页关闭后，本网站将设为${a === 'WT' ? 'WT' : '小说'}模式`],
+    [/^(.+)　— (\d+)話(（今開いている作品）)?$/, (m, w, n, h) => `${trUI(w)} — ${n} chapters${h ? ' (current work)' : ''}`, (m, w, n, h) => `${trUI(w)} — ${n}章${h ? '（当前作品）' : ''}`],
+    [/^(.+)に切り替えました。ページを開き直すので「訳」を押してください（(.+)版の訳があればそれが出ます）$/, 'Switched to $1. The page will reload; press TL (saved $2 translations will be shown)', '已切换到$1。页面将重新打开，请按“译”（如有$2版译文会直接显示）'],
+    [/^原文の言語：(.+?)(（今のページは(.+)と判定）)?$/, (m, a, b, c) => `Source language: ${trUI(a)}${b ? ` (this page: ${trUI(c)})` : ''}`, (m, a, b, c) => `原文语言：${trUI(a)}${b ? `（当前页面判断为${trUI(c)}）` : ''}`],
+    [/^この話の訳を消しました(（挿絵(\d+)枚分も）)?。ページを読み直します$/, (m, a, n) => `Deleted this chapter's translation${a ? ` (and ${n} illustrations)` : ''}. Reloading`, (m, a, n) => `已删除本章译文${a ? `（含${n}张插图）` : ''}。正在重新加载页面`],
+    [/^(\d+)件削除しました。ページを読み直します$/, 'Deleted $1 items. Reloading', '已删除$1条。正在重新加载页面'],
+    [/^この話の保存した訳を消した（(\d+)枚分）。ページを読み直します$/, 'Deleted saved translations for this chapter ($1 images). Reloading', '已删除本章已保存的译文（$1张）。正在重新加载页面'],
+    [/^「(.+)」の訳・話の記録・メモを消す？$/, 'Delete translations, records and notes of "$1"?', '删除《$1》的译文、章节记录和笔记？'],
+    [/^この作品の記録を消した（(\d+)件）$/, 'Deleted this work\'s records ($1 items)', '已删除本作品的记录（$1条）'],
+    [/^この話の画像を全部訳し直す？（今読み込まれている(\d+)枚＋この後読み込まれる分。API代がかかる）$/, 'Retranslate all images of this chapter? ($1 loaded now + those loaded later; API costs apply)', '重新翻译本章全部图片？（当前已加载$1张＋之后加载的部分。会产生API费用）'],
+    [/^(.+): 返事を止められた（(.+)）$/, '$1: response was blocked ($2)', '$1：回复被拦截（$2）'],
+    [/^(.+) はこのキーでは使えないので、(.+) で訳すね（設定も変えた）$/, '$1 is not available with this key, using $2 (settings updated)', '此密钥无法使用$1，改用$2翻译（已更新设置）'],
+    [/^モデルを (.+) に切り替えた$/, 'Switched model to $1', '已将模型切换为$1'],
+    [/^無料枠（1分(\d+)回）なので間隔をあけて訳すね$/, 'Free tier ($1 per minute), spacing out requests', '免费额度（每分钟$1次），将间隔发送'],
+    [/^保存から(\d+)枚表示／新しく(\d+)枚翻訳$/, 'Showed $1 from saved / translated $2 new', '从保存中显示$1张／新翻译$2张'],
+    [/^この作品：(.+?)(（(\d+)話ぶん記録）)?$/, (m, w, a, n) => `This work: ${w}${a ? ` (${n} chapters recorded)` : ''}`, (m, w, a, n) => `本作品：${w}${a ? `（已记录${n}章）` : ''}`],
+    [/^最終更新：([\s\S]*)$/, (m, a) => 'Last updated: ' + trUI(a), (m, a) => '最后更新：' + trUI(a)],
+    [/^本文エリアを保存しました（([\s\S]*)）$/, 'Saved the text area ($1)', '已保存正文区域（$1）'],
+    [/^未反映のセリフ：(\d+)行$/, '$1 lines not yet in notes', '未加入笔记的台词：$1行'],
+    [/^前回の失敗：([\s\S]*)$/, 'last failure: $1', '上次失败：$1'],
+    // 「／」で区切った複数のお知らせは、1つずつ訳す
+    [/^[^／]+(／[^／]+)+$/, (m) => m.split('／').map((x) => trUI(x)).join(' / '), (m) => m.split('／').map((x) => trUI(x)).join('／')],
+  ];
+  function trUI(s) {
+    if (!OUT_X || s == null || typeof s !== 'string') return s;
+    const MAP = OUT_ZH ? ZH_MAP : EN_MAP;
+    if (Object.prototype.hasOwnProperty.call(MAP, s)) return MAP[s];
+    const t = s.trim();
+    if (t !== s && Object.prototype.hasOwnProperty.call(MAP, t)) return s.replace(t, MAP[t]);
+    for (const [re, en, zh] of TR_PAT) if (re.test(t)) return t.replace(re, OUT_ZH ? zh : en);
+    return s;
+  }
+  // HTMLの中の文字（タグの間・title・placeholder・aria-label）だけ英語にする。日本語のときはそのまま
+  // コピー・作品ごとの保存のボタンを外す（使えないとき）
+  function noExport(h) { return EXPORT_OK ? h : h.replace('<button data-a="copy">コピー</button>', '').replace('<button data-a="works">作品ごとに保存</button>', ''); }
+  function trHTML(h) {
+    if (!OUT_X) return h;
+    const JP = /[぀-ヿ一-鿿]/;
+    return h
+      .replace(/>([^<>]+)</g, (m, t) => { const k = t.trim(); if (!k || !JP.test(k)) return m; const e = trUI(k); return e === k ? m : '>' + t.replace(k, e) + '<'; })
+      .replace(/\b(title|placeholder|aria-label)="([^"]*)"/g, (m, a, v) => (JP.test(v) ? `${a}="${trUI(v.replace(/&#10;/g, '\n')).replace(/\n/g, '&#10;')}"` : m));
+  }
+  // お知らせ・確認・メニューの文字も英語にする（日本語のときはそのまま）
+  const alert = (m) => KZ_ALERT(trUI(m));
+  const confirm = (m) => KZ_CONFIRM(trUI(m));
+  const GM_registerMenuCommand = (name, fn) => KZ_MENU(trUI(name), fn);
   // 訳の記録が変わったら、クラウドへの自動バックアップの印を付ける
   let backupDirty = false, backupTimer = 0;
   const GM_setValue = (k, v) => {
@@ -132,6 +561,20 @@ const KZ_SET = GM_setValue;
     return langCache.lang;
   }
   const L = () => LANGS[curLang()];
+  // 英語版：原文の言語の英語名と、固有名詞の扱い
+  const LANGS_EN = {
+    ko: { name: 'Korean', novel: 'a Korean web novel', names: 'Romanize Korean personal names the way they are usually written in English translations (e.g. 김독자 → Kim Dokja, 유중혁 → Yoo Joonghyuk). Translate meaningful proper nouns (shops, places, organizations, skills, items) into natural English instead of transliterating them.' },
+    zh: { name: 'Chinese', novel: 'a Chinese web novel', names: 'Write personal and place names in pinyin (e.g. 林动 → Lin Dong). Translate sect names, techniques, skills and items into meaningful English.' },
+    en: { name: 'English', novel: 'an English web novel', names: 'Keep names as they are.' },
+  };
+  const LE = () => LANGS_EN[curLang()] || LANGS_EN.ko;
+  // 中国語版：原文の言語の中国語名と、固有名詞の扱い
+  const LANGS_ZH = {
+    ko: { name: '韩语', novel: '韩国网络小说', names: '韩国人名使用中文读者常用的汉字写法（例：김독자→金独子，유중혁→刘众赫）。店名、地名、组织、技能、道具等有意义的专有名词，按意思译成自然的中文，不要音译。' },
+    en: { name: '英语', novel: '英文网络小说', names: '人名使用通行的中文音译。有意义的专有名词按意思翻译。' },
+    zh: { name: '中文', novel: '中文网络小说', names: '人名保持原样。' },
+  };
+  const LZ = () => LANGS_ZH[curLang()] || LANGS_ZH.ko;
   const ko = s => countAs(curLang(), s);
   // 訳文に原文の言語が残っているか（残りの文字数。少しなら0）
   const leftIn = t => { const n = ko(t); return n >= L().min ? n : 0; };
@@ -170,7 +613,31 @@ const KZ_SET = GM_setValue;
     return c;
   };
 
-  const sys = () => { const l = L(); return `あなたは${l.novel}を日本語に訳す文芸翻訳者です。
+  const sysEn = () => { const l = LE(); return `You are a literary translator translating ${l.novel} into English.
+Rules:
+- Do not summarize, omit or add anything. Translate all of the content.
+- Keep the paragraph structure: output the same number of paragraphs as the input, separated by one blank line.
+- Write natural, fluent English prose like a published novel, not a literal translation.
+- Dialogue should fit each character's personality and relationships.
+- Use the given context (the whole original chapter and the previous translation) to keep names, forms of address, pronouns and tone consistent.
+- If a glossary or character notes are given, always follow them.
+- ${l.names}
+- Output only the translation. No preface, notes or headings.
+- Reproduce glitched text, mechanical voices, chants, repetitions and spacing effects in English with the same feel; do not leave them in ${l.name}.
+- Do not include the original text. Do not use formats like "original -> translation" or "original (translation)". Leave no ${l.name} at all, including in-story rules, system messages, slogans and quotations. Keep the layout of tables and symbols (such as |) and translate only the ${l.name} inside.`; };
+  const sysZh = () => { const l = LZ(); return `你是一名文学翻译，负责将${l.novel}翻译成简体中文。
+规则：
+- 不要概括、省略或添加内容。翻译全部内容。
+- 保持段落结构：输出与输入相同的段落数，段落之间空一行。
+- 不要直译，要写成自然流畅、像正式出版的小说一样的中文。
+- 对话要符合人物的性格和关系。
+- 根据给出的上下文（整章原文、之前的译文），保持人名、称呼、人称和语气一致。
+- 如果给出了术语表或作品笔记，必须遵守。
+- ${l.names}
+- 只输出译文。不要加前言、注释或标题。
+- 乱码、机械音、咒语般的句子、重复、字间空格等效果，也要用中文以相同的感觉再现，不要保留${l.name}。
+- 不要在输出中包含原文。不要使用“原文 -> 译文”或“原文（译文）”的对照格式。包括作品中的规则文、系统消息、标语、引文在内，一个${l.name}字也不要留下。表格和符号（如 |）的形式保持不变，只翻译其中的${l.name}。`; };
+  const sys = () => { if (OUT_EN) return sysEn(); if (OUT_ZH) return sysZh(); const l = L(); return `あなたは${l.novel}を日本語に訳す文芸翻訳者です。
 ルール:
 - 要約・省略・加筆をしない。原文の内容をすべて訳す。
 - 段落構成を保つ。入力と同じ段落数で出力し、段落の間は空行1つ。
@@ -183,7 +650,11 @@ const KZ_SET = GM_setValue;
 - 文字化け・機械音声・呪文のような崩れた文や繰り返し、文字の間の空白などの演出も、${l.name}のまま残さず、同じ雰囲気の日本語で再現する。
 - 原文を出力に含めない。「原文 -> 訳文」や「原文（訳文）」のような対訳形式にしない。作中のルール文・システムメッセージ・標語・引用文なども含め、${l.name}の文は一文字も残さない。表や記号（| など）の形はそのまま保ち、中の${l.name}だけを日本語にする。`; };
 
-  const sysNum = () => sys() + `
+  const sysNum = () => OUT_ZH ? sys() + `
+- 输入的每个段落开头都有 [[编号]]。输出时每个段落开头也要按相同顺序加上相同的 [[编号]]。一个编号对应一个段落。不要增加、删除、合并或拆分编号。
+- 段落中的 <t1>…</t1> 或 <t2/> 等标签是粗体、斜体、删除线、文字颜色等格式的标记。译文中也要用相同编号的标签包住对应的词语。不要改变标签的编号、数量和嵌套，不要删除，也不要新建。<t2/> 这样的单独标签放在对应的位置。` : OUT_EN ? sys() + `
+- Each input paragraph starts with [[number]]. In the output, start each paragraph with the same [[number]] in the same order. One paragraph per number. Do not add, remove, merge or split numbers.
+- Tags like <t1>…</t1> or <t2/> inside a paragraph mark formatting (bold, italic, strikethrough, color, etc.). In the translation, wrap the corresponding words with the same numbered tags. Do not change the numbers, count or nesting of tags, do not remove them and do not create new ones. Put standalone tags like <t2/> in the matching place.` : sys() + `
 - 入力の各段落の先頭には [[番号]] が付いている。出力でも各段落の先頭に同じ [[番号]] を同じ順で付ける。1つの番号に1段落。番号の追加・削除・統合・分割をしない。
 - 段落内の <t1>…</t1> や <t2/> のようなタグは、太字・斜体・取り消し線・文字色などの装飾の目印。訳文でも、対応する語句を同じ番号のタグで囲む。タグの番号・数・入れ子を変えず、消さず、新しく作らない。<t2/> のような単独タグは対応する位置に置く。`;
 
@@ -662,7 +1133,7 @@ const KZ_SET = GM_setValue;
   const legacyDone = new Set();
   // 前のバージョンの記録（エンジン名なし）は、そのエンジンでまだ訳していなければ引き継ぐ
   function tagged(base) {
-    const k = base + '@' + prov();
+    const k = base + '@' + prov() + (OUT_X ? '#' + OUT_LANG : '');
     if (!legacyDone.has(k)) {
       legacyDone.add(k);
       if (GM_getValue(k, null) == null) { const old = GM_getValue(base, null); if (old != null) KZ_SET(k, old); }
@@ -687,14 +1158,20 @@ const KZ_SET = GM_setValue;
   async function updateSheet(c, src, trText) {
     if (!c.autoSheet || !trText.trim()) return;
     const k = sheetKey(), old = GM_getValue(k, '');
-    const user = `【現在のメモ】\n${old || '（なし）'}\n\n【今回の話の原文】\n${src.slice(0, 30000)}\n\n【今回の訳文】\n${trText.slice(0, 30000)}\n\n`
+    const user = OUT_ZH ? `【当前笔记】\n${old || '（无）'}\n\n【本章原文】\n${src.slice(0, 30000)}\n\n【本章译文】\n${trText.slice(0, 30000)}\n\n`
+      + `请根据本章译文实际采用的译法更新笔记，并输出完整笔记。\n`
+      + `人物每行一个：“原文=中文译名｜性别｜说话方式・称呼・关系”；术语：“原文=中文｜术语｜简短说明”。\n`
+      + `只写登场人物和反复出现的专有名词，最多50行。已有条目如无矛盾不要改动。只输出笔记内容。` : OUT_EN ? `[Current notes]\n${old || '(none)'}\n\n[Original of this chapter]\n${src.slice(0, 30000)}\n\n[Translation of this chapter]\n${trText.slice(0, 30000)}\n\n`
+      + `Update the notes to match how things were actually translated in this chapter, and output the full notes.\n`
+      + `Characters: one per line as "original=English name｜gender｜how they speak / address others / relationships". Terms: "original=English｜term｜short description".\n`
+      + `Only characters and recurring proper nouns, up to 50 lines. Keep existing entries unless they conflict. Output only the notes.` : `【現在のメモ】\n${old || '（なし）'}\n\n【今回の話の原文】\n${src.slice(0, 30000)}\n\n【今回の訳文】\n${trText.slice(0, 30000)}\n\n`
       + `今回の訳文で実際に使われた訳し方に合わせて、メモを更新した全文を出力してください。\n`
       + `人物は1行に「原語=訳語｜性別｜一人称｜話し方・呼び方・関係」、用語は「原語=訳語｜用語｜短い説明」。\n`
       + `登場人物と繰り返し出る固有名詞だけ、最大50行。既存の項目は矛盾がない限り変えない。メモ本文のみ出力。`;
     try {
       const sm = c.sheetModel.trim() || SHEET_MODELS[c.provider];
       const models = sm ? [sm, ...modelList(c)] : modelList(c); // 安いモデルが使えなければ翻訳用のモデルで
-      const res = await withRetry(m => llm(c, `あなたは${L().novel}を日本語に訳すための人物・用語メモを管理する編集者です。`, user, m), models, () => {});
+      const res = await withRetry(m => llm(c, OUT_ZH ? `你是一名编辑，负责维护将${LZ().novel}翻译成中文所用的人物和术语笔记。` : OUT_EN ? `You are an editor who maintains character and term notes for translating ${LE().novel} into English.` : `あなたは${L().novel}を日本語に訳すための人物・用語メモを管理する編集者です。`, user, m), models, () => {});
       const sheet = res.replace(/^```\w*\n?|```$/g, '').trim().slice(0, 6000);
       if (sheet) GM_setValue(k, sheet);
     } catch { /* メモの更新に失敗しても翻訳には影響しない */ }
@@ -794,6 +1271,7 @@ const KZ_SET = GM_setValue;
   const pageId = () => location.host + location.pathname + (mark().kztlEp ? '#' + mark().kztlEp : '');
   function setLast(t) { lastText = t || ''; lastHref = pageId(); ui.canCopy(!!lastText); }
   function copyText() {
+    if (!EXPORT_OK) return;
     if (!lastText) {
       // 開き直した直後でも、この話で訳した記録があればそれをコピーする
       const ld = liveData && liveData.key === liveKey() ? liveData : GM_getValue(liveKey(), null);
@@ -848,6 +1326,7 @@ const KZ_SET = GM_setValue;
   }
 
   function saveHtml() {
+    if (!EXPORT_OK) return;
     if (!copyCtx && (liveData?.key === liveKey() || GM_getValue(liveKey(), null))) {
       if (!liveData || liveData.key !== liveKey()) liveData = GM_getValue(liveKey(), null);
       return liveSaveHtml();
@@ -872,7 +1351,7 @@ const KZ_SET = GM_setValue;
     snapshotEp();
     const dataTag = data ? `<script type="application/json" id="kztl-episode">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>\n` : '';
     const html = `<!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="${OUT_EN ? 'en' : OUT_ZH ? 'zh-CN' : 'ja'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}（翻訳）</title>
 ${dataTag}</head>
 <body style="margin:0;background:${pageBackground(src)}">
@@ -1038,6 +1517,7 @@ ${bodyHtml}
   }
   async function translate(force) {
     if (busy) return;
+    if (OUT_X && curLang() === OUT_LANG) return ui.toast(OUT_ZH ? '此页面已经是中文' : 'This page is already in English');
     const el = findBody();
     ui.open();
     if (!el) return ui.status('本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」を使ってください');
@@ -1275,7 +1755,7 @@ ${bodyHtml}
     return /(serif|明朝|명조|바탕|batang|myeongjo|mincho|song)/i.test(first) && !/(sans|gothic|고딕|돋움|dotum|gulim|굴림)/i.test(first);
   };
   function markJa(el) {
-    if (!el || !el.isConnected || cfg().jaFont === false) return;
+    if (!el || !el.isConnected || cfg().jaFont === false || OUT_X) return;
     jaStyle();
     const one = e => {
       if (jaOrig.has(e)) return;
@@ -1385,7 +1865,7 @@ ${bodyHtml}
       await pool(Math.max(1, +c.parallel || 1), groups.length, async g => {
         const ids = groups[g];
         const user = buildUser(c, whole, ref, 'この話の冒頭の訳文', ids.map(i => `[[${i + 1}]] ${srcs[i]}`).join('\n\n'));
-        user.msg += `\n\n（注意：前回これらの段落は${L().name}のまま返ってきました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`;
+        user.msg += OUT_ZH ? `\n\n（注意：上次这些段落以${LZ().name}返回。请务必在每个段落开头加上 [[编号]]，全部译成中文，不要留下任何${LZ().name}。）` : OUT_EN ? `\n\n(Note: last time these paragraphs came back in ${LE().name}. Always start each paragraph with its [[number]] and translate everything into English, leaving no ${LE().name}.)` : `\n\n（注意：前回これらの段落は${L().name}のまま返ってきました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`;
         try {
           const m = parseNum(await withRetry(mm => llm(c, sysNum(), user, mm), modelList(c), (...a) => ui.toast(waitMsg(...a))));
           for (const i of ids) {
@@ -1956,6 +2436,7 @@ ${bodyHtml}
 
   async function translateShown(force) {
     if (liveBusy) return;
+    if (OUT_X && curLang() === OUT_LANG) return ui.toast(OUT_ZH ? '此页面已经是中文' : 'This page is already in English');
     liveData = liveData && liveData.key === liveKey() ? liveData : (GM_getValue(liveKey(), null) || { order: [], map: {}, meta: {} });
     liveData.key = liveKey();
     copyCtx = null;
@@ -1996,7 +2477,7 @@ ${bodyHtml}
           ui.toast(`${L().name}が残った${bad.length}文を訳し直し中…${round > 1 ? '（2回目）' : ''}`);
           const before = {};
           bad.forEach(({ el, src }) => { before[src] = liveData.map[src]; delete liveData.map[src]; liveQueue.set(src, el); });
-          await runParallel(`（注意：前回これらの文は${L().name}が残りました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`);
+          await runParallel(OUT_ZH ? `（注意：上次这些句子残留了${LZ().name}。请务必在每个段落开头加上 [[编号]]，全部译成中文，不要留下任何${LZ().name}。）` : OUT_EN ? `(Note: last time ${LE().name} was left in these lines. Always start each paragraph with its [[number]] and translate everything into English, leaving no ${LE().name}.)` : `（注意：前回これらの文は${L().name}が残りました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`);
           bad.forEach(({ el, src }) => {
             const old = before[src], cur = liveData.map[src];
             if (old != null && (cur == null || leftIn(cur) > leftIn(old))) liveData.map[src] = old; // 前より悪くなったら前の訳を使う
@@ -2113,7 +2594,7 @@ ${body}</main></body></html>`;
 
   // ---------- 作品ごとに全話まとめて保存 ----------
   // 訳した話は「リーダー用データ」をこの端末に控えておく（ページを開かなくても後でまとめて書き出せる）
-  const epKey = () => 'ep:' + workKey() + '|' + pageId() + '@' + prov();
+  const epKey = () => 'ep:' + workKey() + '|' + pageId() + '@' + prov() + (OUT_X ? '#' + OUT_LANG : '');
   const epNum = t => { const m = String(t || '').match(/(\d+)\s*(?:화|話|회|回)/) || String(t || '').match(/(\d+)(?!.*\d)/); return m ? +m[1] : null; };
   let snapTimer = 0;
   const snapLater = () => { clearTimeout(snapTimer); snapTimer = setTimeout(snapshotEp, 800); };
@@ -2193,6 +2674,7 @@ ${body}</main></body></html>`;
     return [...works.values()].sort((a, b) => a.work.localeCompare(b.work));
   }
   function saveWorkZip(wk) {
+    if (!EXPORT_OK) return;
     const w = epWorks().find(x => x.wk === wk);
     if (!w) return ui.toast('この作品の控えがまだありません。訳した話を一度開いて「訳」を押すと控えられます', 5000);
     const eps = [...w.pages.values()].map(list => list.find(v => v.prov === prov()) || list.sort((a, b) => b.at - a.at)[0]);
@@ -2209,6 +2691,7 @@ ${body}</main></body></html>`;
     ui.toast(`「${w.work}」${eps.length}話をまとめて保存しました${nums.length ? `（${Math.min(...nums)}〜${Math.max(...nums)}話）` : ''}`, 5000);
   }
   function showWorkList() {
+    if (!EXPORT_OK) return;
     ui.open();
     const ws = epWorks();
     ui.workList(ws.map(w => ({ wk: w.wk, work: w.work, n: w.pages.size, here: w.wk === workKey() })));
@@ -2229,6 +2712,7 @@ ${body}</main></body></html>`;
 
   async function translateInPlace(force) {
     if (busy) return;
+    if (OUT_X && curLang() === OUT_LANG) return ui.toast(OUT_ZH ? '此页面已经是中文' : 'This page is already in English');
     // カカオの演出ビューアのように、表示中の数文だけが文字になっている作りなら「表示中の文だけ訳す」
     // カカオページは、グループの大小に関係なくいつも「表示中の文を文字だけ差し替え」で訳す
     // （要素を作り替えるとビューアが壊れるため。訳した文は全グループ分まとめて記録・保存される）
@@ -2646,7 +3130,7 @@ ${body}</main></body></html>`;
         z-index: 2147483647; background: transparent; display: block; }
     </style>`;
     // 設定・読書パネルはiframeの中に置く。サイト側のキー操作やタップ判定（ページ送りなど）に入力を奪われないようにするため
-    const PANEL = `<div class="panel">
+    const PANEL = trHTML(noExport(`<div class="panel">
       <div class="bar">
         <button data-a="close">閉じる</button>
         <button data-a="redo">再翻訳</button>
@@ -2664,7 +3148,9 @@ ${body}</main></body></html>`;
           </div>
           <div class="hint modehint"></div>
           <div class="cfg-novel">
-          <div class="sec" style="border-top:0;padding-top:0;margin-top:0">翻訳エンジン</div>
+          <label>表示・翻訳の言語 / Language
+            <select name="outLang"><option value="ja">日本語</option><option value="en">English</option><option value="zh">中文（简体）</option></select></label>
+          <div class="sec">翻訳エンジン</div>
           <label>表示方法
             <select name="mode">
               <option value="inplace">元のページに上書き（サイトの見た目のまま）</option>
@@ -2755,8 +3241,8 @@ ${body}</main></body></html>`;
           </div>
         </div>
       </div>
-    </div>`;
-    root.innerHTML = STYLE + `
+    </div>`));
+    root.innerHTML = STYLE + trHTML(`
     <div class="dock">
       <button class="fab sub save" title="訳したページを保存" hidden>保</button>
       <button class="fab sub copy" title="訳文をコピー" hidden>写</button>
@@ -2766,7 +3252,7 @@ ${body}</main></body></html>`;
     <div class="ov-layer"></div>
     <div class="toast" hidden></div>
     <div class="card" hidden><button class="card-x" title="閉じる">×</button><div class="card-body"></div></div>
-    <iframe class="panel" hidden title="翻訳パネル"></iframe>`;
+    <iframe class="panel" hidden title="翻訳パネル"></iframe>`);
     document.documentElement.appendChild(host);
     const frame = root.querySelector('iframe.panel');
     let pd = frame.contentDocument;
@@ -2808,18 +3294,18 @@ ${body}</main></body></html>`;
       f('lang').value = c.lang || 'auto';
       for (const k of ['mode', 'provider', 'key', 'model', 'fallback', 'baseUrl', 'chunk', 'parallel', 'glossary', 'instructions']) f(k).value = c[k];
       f('model').placeholder = MODELS[c.provider];
-      f('fallback').placeholder = FALLBACKS[c.provider] || 'なし';
+      f('fallback').placeholder = FALLBACKS[c.provider] || trUI('なし');
       f('adult').checked = !!c.adult;
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
-      f('illust').checked = c.illust !== false; f('autoMode').checked = c.autoMode !== false;
+      f('outLang').value = OUT_LANG; f('illust').checked = c.illust !== false; f('autoMode').checked = c.autoMode !== false;
       f('gistToken').value = c.gistToken || ''; f('autoBackup').checked = c.autoBackup !== false;
       f('autoSheet').checked = !!c.autoSheet;
       f('quickStart').checked = c.quickStart !== false;
       f('sheet').value = sheetLoaded = getSheet();
-      $('.sheet-title').textContent = `この作品のメモ【${workName().slice(0, 30) || workKey()}】`;
+      $('.sheet-title').textContent = trUI(`この作品のメモ【${workName().slice(0, 30) || workKey()}】`);
       f('sheetModel').value = c.sheetModel;
-      f('sheetModel').placeholder = SHEET_MODELS[c.provider] || '翻訳と同じモデル';
+      f('sheetModel').placeholder = SHEET_MODELS[c.provider] || trUI('翻訳と同じモデル');
       fillModels();
       try { setMode(typeof tab === 'string' ? tab : GM_getValue(wtKey(), false) ? 'wt' : 'novel'); } catch { setMode('novel'); } // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
     }
@@ -2828,7 +3314,7 @@ ${body}</main></body></html>`;
     async function fillModels() {
       const sel = f('modelPick'), prov = f('provider').value, key = f('key').value.trim();
       const put = (list, note) => {
-        sel.replaceChildren(new Option(note, ''), ...list.map(n => new Option(n, n)));
+        sel.replaceChildren(new Option(trUI(note), ''), ...list.map(n => new Option(n, n)));
       };
       const base = [...new Set([MODELS[prov], ...(FALLBACKS[prov] || '').split(/[,\s]+/), ...(CANDIDATES[prov] || [])].filter(Boolean))];
       put(base, '（選ぶとモデル名に入ります）');
@@ -2851,8 +3337,8 @@ ${body}</main></body></html>`;
       f('model').value = draft.models[curProv] || '';
       f('fallback').value = draft.fallbacks[curProv] || '';
       f('sheetModel').value = draft.sheetModels[curProv] || '';
-      f('sheetModel').placeholder = SHEET_MODELS[curProv] || '翻訳と同じモデル';
-      f('model').placeholder = MODELS[curProv]; f('fallback').placeholder = FALLBACKS[curProv] || 'なし';
+      f('sheetModel').placeholder = SHEET_MODELS[curProv] || trUI('翻訳と同じモデル');
+      f('model').placeholder = MODELS[curProv]; f('fallback').placeholder = FALLBACKS[curProv] || trUI('なし');
       fillModels();
     });
 
@@ -2870,7 +3356,7 @@ ${body}</main></body></html>`;
     let curTab = 'novel';
     function setMode(m) {
       curTab = m === 'wt' ? 'wt' : 'novel';
-      wq('.modehint').textContent = `このタブのまま閉じると、このサイトは${curTab === 'wt' ? 'WT' : '小説'}モードになります`;
+      wq('.modehint').textContent = trUI(`このタブのまま閉じると、このサイトは${curTab === 'wt' ? 'WT' : '小説'}モードになります`);
       wq('.cfg-novel').hidden = m === 'wt'; wq('.cfg-wt').hidden = m !== 'wt';
       wq('[data-a="mode-novel"]').classList.toggle('on', m !== 'wt'); wq('[data-a="mode-wt"]').classList.toggle('on', m === 'wt');
       if (m === 'wt') fillWT();
@@ -2884,7 +3370,7 @@ ${body}</main></body></html>`;
       wtMemoBase = { memo: wf('memo').value, story: wf('story').value };
       wq('.wt-tsv').textContent = wf('ts').value;
       wq('.wt-work').hidden = !api;
-      if (api) { wq('.wt-wn').textContent = v.wn || 'この作品のメモ'; wq('.wt-memost').textContent = v.memost || ''; }
+      if (api) { wq('.wt-wn').textContent = trUI(v.wn || 'この作品のメモ'); wq('.wt-memost').textContent = trUI(v.memost || ''); }
     }
     let wtMemoBase = { memo: null, story: null };
     // メモ・あらすじは手で書き換えたときだけ渡す（開いている間に裏で更新された新しいメモを、古い内容で上書きしない）
@@ -2899,7 +3385,7 @@ ${body}</main></body></html>`;
       if (!api) return ui.toast('このページではWTの設定を変えられません（ページの中の小さな画面のため）', 4000);
       if (a === 'wt-save') {
         api.save(wtVals());
-        settings(false); st.textContent = 'WTの設定を保存しました';
+        settings(false); st.textContent = trUI('WTの設定を保存しました');
         check();
         return;
       }
@@ -2914,7 +3400,7 @@ ${body}</main></body></html>`;
       const n = e.target && e.target.name;
       if (!n || !n.startsWith('wt_') || n === 'wt_imf') return;
       clearTimeout(wtAutoTimer);
-      wtAutoTimer = setTimeout(() => { const api = wtReady(); if (api) { api.save(wtVals()); st.textContent = 'WTの設定を反映しました'; } }, 250);
+      wtAutoTimer = setTimeout(() => { const api = wtReady(); if (api) { api.save(wtVals()); st.textContent = trUI('WTの設定を反映しました'); } }, 250);
     });
     wf('ts').addEventListener('input', () => { wq('.wt-tsv').textContent = wf('ts').value; if (wtApi) wtApi.preview(wf('ts').value); });
     wf('imf').addEventListener('change', async e => {
@@ -3026,7 +3512,7 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
         if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
@@ -3035,7 +3521,18 @@ ${body}</main></body></html>`;
           if (f('sheet').value.trim()) GM_setValue(sheetKey(), f('sheet').value.trim());
           else GM_deleteValue(sheetKey());
         }
-        settings(false); st.textContent = '設定を保存しました';
+        settings(false); st.textContent = trUI('設定を保存しました');
+        // 表示・翻訳の言語を変えたとき：WTの訳す言語も合わせて、ページを読み直す（画面の文字を切り替えるため）
+        if (f('outLang').value !== OUT_LANG) {
+          try {
+            const raw = GM_getValue('ezc_settings', null), ws = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+            const TG = { ja: '日本語', en: 'English', zh: 'Chinese (Simplified)' };
+            // 今の言語の決まりの訳し先のままなら、新しい言語の訳し先に変える（自分で別の言語にしていたらそのまま）
+            if ((ws.target || '日本語') === TG[OUT_LANG]) ws.target = TG[f('outLang').value] || '日本語';
+            KZ_SET('ezc_settings', typeof raw === 'string' ? JSON.stringify(ws) : ws);
+          } catch { /* WTの設定なし */ }
+          setTimeout(() => location.reload(), 300);
+        }
       }
     };
     root.addEventListener('click', onClick);
@@ -3075,16 +3572,16 @@ ${body}</main></body></html>`;
       toast: (m, hideMs) => {
         clearTimeout(toastTimer);
         if (toastEl.hidden) { toastEl.style.animation = 'none'; void toastEl.offsetWidth; toastEl.style.animation = ''; }
-        toastEl.textContent = m; toastEl.hidden = false;
+        m = trUI(m); toastEl.textContent = m; toastEl.hidden = false;
         // エラーなどは少し長めに出して消す（お知らせは押しても下のボタンに届くように、タップは受けない）
-        if (!hideMs && /エラー|失敗|見つかりません|読み込めません|できません/.test(m)) hideMs = 8000;
+        if (!hideMs && /エラー|失敗|見つかりません|読み込めません|できません|Error|failed|not found|Cannot|错误|失败|找不到|无法/i.test(m)) hideMs = 8000;
         if (hideMs) toastTimer = setTimeout(() => { toastEl.hidden = true; }, hideMs);
       },
-      fabText: () => fab.textContent,
+      fabText: () => fab.dataset.l || fab.textContent,
       uiScale: () => uiScale,
       // 表示だけ変える（挿絵の状態などは変えない）：今の画面で押すと何が起きるか
-      fabShow: t => { if (fab.textContent === t) return; fab.textContent = t; fab.classList.toggle('on', t === '原'); fab.title = t === '原' ? '原文に戻す' : 'この画面を翻訳'; },
-      fabLabel: t => { fab.textContent = t; fab.classList.toggle('on', t === '原'); fab.title = t === '原' ? '原文に戻す' : 'この話を翻訳'; try { onNovelState(t === '原'); } catch { /* 挿絵なし */ } },
+      fabShow: t => { if ((fab.dataset.l || fab.textContent) === t) return; fab.dataset.l = t; fab.textContent = trUI(t); fab.classList.toggle('on', t === '原'); fab.title = trUI(t === '原' ? '原文に戻す' : 'この画面を翻訳'); },
+      fabLabel: t => { fab.dataset.l = t; fab.textContent = trUI(t); fab.classList.toggle('on', t === '原'); fab.title = trUI(t === '原' ? '原文に戻す' : 'この話を翻訳'); try { onNovelState(t === '原'); } catch { /* 挿絵なし */ } },
       // 小説の翻訳中、または挿絵の翻訳中は「訳/原」ボタンのまわりが回る
       setBusy: v => { fab.dataset.nb = v ? '1' : ''; fab.classList.toggle('busy', !!(v || fab.dataset.ib)); },
       setIllustBusy: v => { fab.dataset.ib = v ? '1' : ''; fab.classList.toggle('busy', !!(v || fab.dataset.nb)); },
@@ -3100,18 +3597,18 @@ ${body}</main></body></html>`;
           end: () => { if (st && st.pos) GM_setValue(posKey, st.pos); st = null; },
         };
       })(),
-      canCopy: v => { hasCopy = v; copyBtn.hidden = !v || fab.hidden; saveBtn.hidden = !v || fab.hidden || !canSave(); },
+      canCopy: v => { hasCopy = v && EXPORT_OK; copyBtn.hidden = !hasCopy || fab.hidden; saveBtn.hidden = !hasCopy || fab.hidden || !canSave(); },
       openSettings: tab => openSettings(tab),
       isOpen: () => !panel.hidden,
       open: () => { panel.hidden = false; fab.hidden = true; settings(false); $('.scroll').scrollTop = 0; },
-      status: m => { st.textContent = m; },
+      status: m => { st.textContent = trUI(m); },
       workList: list => {
         settings(false);
         text.replaceChildren(...list.map(w => {
           const b = document.createElement('button');
           b.dataset.a = 'zip'; b.dataset.wk = w.wk; b.className = w.here ? 'primary' : '';
           b.style.cssText = 'display:block;width:100%;text-align:left;margin:0 0 10px;font:500 15px/1.5 system-ui,sans-serif;padding:12px 14px';
-          b.textContent = `${w.work || '（名前なし）'}　— ${w.n}話${w.here ? '（今開いている作品）' : ''}`;
+          b.textContent = trUI(`${w.work || '（名前なし）'}　— ${w.n}話${w.here ? '（今開いている作品）' : ''}`);
           return b;
         }));
       },
@@ -3165,8 +3662,7 @@ ${body}</main></body></html>`;
   // ---------- メニュー ----------
   GM_registerMenuCommand('設定を開く', () => { ui.open(); ui.settings(true); });
   GM_registerMenuCommand('この話を翻訳し直す（上書き表示）', () => translateInPlace(true));
-  GM_registerMenuCommand('訳文をコピー', copyText);
-  GM_registerMenuCommand('訳したページをHTMLで保存', saveHtml);
+  if (EXPORT_OK) { GM_registerMenuCommand('訳文をコピー', copyText); GM_registerMenuCommand('訳したページをHTMLで保存', saveHtml); }
   GM_registerMenuCommand('ボタンの位置をリセット', () => { GM_deleteValue('pos:' + location.host); location.reload(); });
   GM_registerMenuCommand('下まで読み込んでから翻訳（本文が途中までしか訳されないとき）', async () => {
     if (busy) return;
@@ -3272,7 +3768,7 @@ ${body}</main></body></html>`;
     const now = curLang();
     ui.toast(`原文の言語：${LANG_OPT[next]}${next === 'auto' ? `（今のページは${LANGS[now].name}と判定）` : ''}`, 3500);
   });
-  GM_registerMenuCommand('作品ごとに全話まとめて保存（ZIP）', showWorkList);
+  if (EXPORT_OK) GM_registerMenuCommand('作品ごとに全話まとめて保存（ZIP）', showWorkList);
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
@@ -3471,7 +3967,7 @@ ${body}</main></body></html>`;
   const DEFAULTS = {
     apiKey: '',
     models: 'gemini-3.8-flash', // 混雑・エラー時は左から順に切り替え（カンマ区切り）
-    target: '日本語',
+    target: OUT_EN ? 'English' : OUT_ZH ? 'Chinese (Simplified)' : '日本語',
     sfx: false,          // 効果音も訳す
     vertical: 'auto',    // auto: 縦長の吹き出しは縦書き / off: 常に横書き
     glossary: '',        // 固定訳（例: 김독자=キム・ドクチャ）
@@ -4252,6 +4748,11 @@ ${w.story || '（なし）'}
 
   function buildPrompt() {
     const t = S.target;
+    // 日本語に訳すときはこれまでと同じ決まり。ほかの言語のときは、その言語で普通の書き方にする
+    const namesRule = langTag() === 'ja'
+      ? '- 人名：韓国の人名は姓も名も全部カタカナにする（姓だけ漢字にしない。例：김독자→キム・ドクチャ、이현성→イ・ヒョンソン）。姓と名の間は「・」。中国の人名は日本の漢字（新字体）。英語の人名はカタカナ。\n- 会社・組織・場所・技・アイテムなど意味のある固有名詞は、音をそのままカタカナにせず意味が伝わる日本語にする（例：백일몽→白日夢）。\n'
+      : /chinese|中国|中文|簡体|简体|繁体/i.test(t) ? `- 人名は${t}で一般的な書き方にする（韓国の人名は中国語圏で一般的な漢字表記：김독자→金独子、유중혁→刘众赫）。\n- 会社・組織・場所・技・アイテムなど意味のある固有名詞は、音をそのまま写さず${t}で意味が伝わる訳にする。\n`
+      : `- 人名は${t}で一般的な書き方にする（英語なら韓国の人名はローマ字：김독자→Kim Dokja、中国の人名はピンイン）。\n- 会社・組織・場所・技・アイテムなど意味のある固有名詞は、音をそのまま写さず${t}で意味が伝わる訳にする。\n`;
     let p = `あなたは漫画・ウェブトゥーンのプロ翻訳者です。画像内の文字を見つけて${t}に翻訳してください。
 - 吹き出し・テキスト枠ごとに1項目。同じ吹き出し・同じ枠の複数行は、画像の区切りをまたいでいても必ず1項目にまとめる（行ごとに分けない）。枠なしの文も、続いている1つの文なら行ごとに文字の大きさ・色・縁取りが違っても1項目にまとめ、box_2d は全部の行を囲む（途中の行だけ囲まない）。
 - 画像は縦に続く1つの場面を上から順に区切ったもの（区切りの境目は少し重なっている）。各項目の img にその文字がある画像番号を入れる。
@@ -4267,9 +4768,7 @@ ${w.story || '（なし）'}
 - 一部の言葉だけ見た目が違うときは、tr の中のその部分を ⟦印|訳⟧ で囲む。印は色 #RRGGBB と b（太字）・i（斜体）・s（取り消し線）・u（下線）をカンマでつなぐ（例：⟦#e8352a,b|訳⟧、⟦s|訳⟧）。
 - color: 原文の文字色を #RRGGBB で。stroke: 原文の文字にフチ（縁取り）があればその色を #RRGGBB で、なければ空文字。
 - 訳は漫画として自然な話し言葉にし、キャラの口調・感情・語尾のニュアンスを残す。説明的にしない。長さは原文と同程度に。
-- 人名：韓国の人名は姓も名も全部カタカナにする（姓だけ漢字にしない。例：김독자→キム・ドクチャ、이현성→イ・ヒョンソン）。姓と名の間は「・」。中国の人名は日本の漢字（新字体）。英語の人名はカタカナ。
-- 会社・組織・場所・技・アイテムなど意味のある固有名詞は、音をそのままカタカナにせず意味が伝わる日本語にする（例：백일몽→白日夢）。
-- 原文がすでに${t}なら tr は原文のまま。
+${namesRule}- 原文がすでに${t}なら tr は原文のまま。
 - 日本語・中国語の訳では単語の間に空白を入れない。改行は意味の切れ目で入れてよい（原文の改行位置に合わせなくていい）。
 - 読む順に並べる。文字が無ければ空配列。`;
     // 効果音も必ず返してもらい、表示するかはこっちで決める（「効果音は含めない」と頼むと、装飾文字の文まで丸ごと落とされることがある）
@@ -5179,6 +5678,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
 
   function setBadge(img, text, onTap) {
     if (text && !onTap && !S.debug && /^(翻訳中|翻訳待ち|回数制限のため待機中)/.test(text)) text = null; // 途中経過は画像に出さない（WTボタンで分かる）
+    if (text) text = trUI(text);
     const ov = getOverlay(img);
     let b = ov.querySelector('.ezc-badge');
     if (!text) { if (b) b.remove(); return; }
@@ -6478,7 +6978,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   const host = document.createElement('div');
   host.style.cssText = 'all:initial;position:fixed;z-index:2147483647;';
   const root = host.attachShadow({ mode: 'open' });
-  root.innerHTML = `
+  root.innerHTML = trHTML(`
 <style>
   :host{all:initial}
   *{box-sizing:border-box;font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
@@ -6575,7 +7075,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     <button id="close">閉じる</button>
   </div>
 </div>
-<div class="toast" id="toast" hidden></div>`;
+<div class="toast" id="toast" hidden></div>`);
   document.documentElement.appendChild(host);
   host.style.display = 'none'; // 漫画の画像が見つかるまでは出さない
   let wtWant = false, wtPlaced = false;
@@ -6683,7 +7183,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     if (QUIET.test(String(msg)) && !S.debug) return;
     if (ui.isOpen()) return ui.toast(String(msg), 3000); // 設定画面を開いている間はWTの表示が隠れるので、設定画面側に出す
     const t = $('toast');
-    t.textContent = msg; t.hidden = false;
+    msg = trUI(String(msg)); t.textContent = msg; t.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (t.hidden = true), 2600);
   }
