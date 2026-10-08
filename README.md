@@ -6,12 +6,15 @@
 
 [![作者を応援する（OFUSE）](https://img.shields.io/badge/%E2%98%95_%E4%BD%9C%E8%80%85%E3%82%92%E5%BF%9C%E6%8F%B4%E3%81%99%E3%82%8B-OFUSE-e91e63?style=for-the-badge)](https://ofuse.me/ikasumi)
 
+> **English:** Translate Korean / Chinese web novels and webtoons into English right on the page — [see below](#english).
+>
+> **中文：** 在网页上直接把韩国网络小说和条漫翻译成中文 —— [点此查看](#中文)。
+
 ## できること
 
 - 本文をその場で日本語に置き換え（サイトの見た目のまま）
 - 原文の言語（韓国語・中国語・英語）を自動で判定
 - 人物・用語メモを作品ごとに自動で作って、話をまたいで訳をそろえる
-- 訳文のコピー、1話ずつのHTML保存、作品ごとの全話まとめて保存（ZIP）
 - 一度訳した話は保存されるので、開き直しても料金はかからない
 - GitHubへの自動バックアップ（スマホを無くしても戻せる）
 - **WTモード**：漫画・ウェブトゥーンの吹き出しを読み取って、吹き出しの上に訳を重ねる
@@ -89,8 +92,6 @@ WTの設定は、APIキーなどを空欄にしておけば小説と同じもの
 |---|---|
 | **訳**（青） | 翻訳する。翻訳中はまわりがくるくる回ります |
 | **原**（緑） | 原文に戻す |
-| **写** | 訳文をコピー |
-| **保** | この話をHTMLで保存 |
 | **⚙** | 設定 |
 
 - ボタンは指でドラッグして、好きな場所に動かせます
@@ -117,7 +118,6 @@ WTの設定は、APIキーなどを空欄にしておけば小説と同じもの
 
 ### Tampermonkeyのメニューでできること
 - **この話を翻訳し直す**：訳が気に入らないとき（料金がかかります）
-- **作品ごとに全話まとめて保存（ZIP）**：訳した話を作品ごとにまとめて保存
 - **エンジンを切り替え**：ClaudeとGeminiの訳を両方残して見比べられる
 - **原文の言語を切り替え**：自動判定がうまくいかないとき
 - **WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）**：小説モード⇄WTモードの切り替え
@@ -161,7 +161,7 @@ APIキーとトークンはバックアップに入らないので、入れ直�
 
 ## 注意
 
-- 保存したHTMLやZIPは **自分で読む用** にしてください。人に配ったりネットに上げたりしないでください
+- 訳は **自分で読む用** です。訳文を人に配ったりネットに上げたりしないでください（悪用を防ぐため、訳文のコピー・HTML保存の機能は入っていません）
 - APIキー・トークンは人に教えないでください
 - サイトの作りが変わると動かなくなることがあります
 
@@ -182,3 +182,50 @@ APIキーとトークンはバックアップに入らないので、入れ直�
 👉 **[OFUSEで応援する](https://ofuse.me/ikasumi)**
 
 （スクリプトの設定画面のいちばん下にもボタンがあります）
+
+---
+
+## English
+
+**Ikasumi Translator** translates Korean and Chinese web novels into natural English right on the page, using the whole chapter as context so names and tone stay consistent. It also translates speech bubbles in comics/webtoons (WT mode).
+
+> The English version is currently a **beta**. Please report anything strange.
+
+**Install**
+1. Install **Tampermonkey** (Chrome / Edge / Firefox / Safari on iPhone) or **Violentmonkey** (Firefox, also on Android).
+2. Open 👉 **[Install the script (beta)](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.beta.user.js)** and press "Install".
+3. Open a novel page and tap ⚙ to open settings. Choose **Language / 表示・翻訳の言語: English**, enter your **Gemini API key** ([get one at Google AI Studio](https://aistudio.google.com/apikey)) and press **Save**.
+4. Press **TL** to translate, **RAW** to go back to the original.
+
+**Works on:** Ridibooks, KakaoPage (novels & webtoons), Naver Webtoon, Jinjiang (晋江), and most novel sites.
+
+**Notes**
+- On a fresh install, the script starts in English unless your browser is set to Japanese or Chinese. You can switch any time in Settings.
+- Your API key and records stay in your browser. Translations are saved, so reopening a chapter costs nothing.
+- Translations are for personal use only. Copying or exporting translated text is not available.
+
+☕ [Support the author (OFUSE)](https://ofuse.me/ikasumi)
+
+---
+
+## 中文
+
+**イカ墨翻訳（Ikasumi Translator）** 能在网页上直接把韩国网络小说翻译成自然的简体中文。它会参考整章内容来翻译，人名和语气前后一致。还能翻译漫画、条漫的对话框（WT模式）。
+
+> 中文版目前是**测试版**。如果发现奇怪的地方，欢迎反馈。
+
+**安装方法**
+1. 安装浏览器扩展 **Tampermonkey**（Chrome / Edge / Firefox / iPhone 的 Safari）或 **Violentmonkey**（Firefox，安卓也可用）。
+2. 打开 👉 **[安装脚本（测试版）](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.beta.user.js)**，点击“安装”。
+3. 打开小说页面，点 ⚙ 打开设置。在 **语言 / Language** 中选择 **中文（简体）**，填入 **Gemini API 密钥**（可在 [Google AI Studio](https://aistudio.google.com/apikey) 获取），然后点 **保存**。
+4. 按 **译** 开始翻译，按 **原** 恢复原文。
+
+**支持的网站：** Ridibooks、KakaoPage（小说和条漫）、Naver Webtoon，以及大多数小说网站。
+
+**说明**
+- 首次安装时，如果浏览器语言是中文，会自动以中文界面启动。
+- API 密钥和翻译记录只保存在你的浏览器里。翻译过的章节会被保存，再次打开不会产生费用。
+- 译文仅供个人使用。本脚本不提供复制或导出译文的功能。
+
+☕ [支持作者（OFUSE）](https://ofuse.me/ikasumi)
+
