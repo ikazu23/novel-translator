@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.73
+// @version      10.5.74
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4656,36 +4656,47 @@ ${w.story || '（なし）'}
     }
     // ほかのサイトの画像：まず読み込んだデータを絵にしてみる。だめなら（ブラウザが読めない形式・サイトの保護など）別の取り方を順に試す
     const errs = [];
-    try { return await loadDrawable(await getImageBlob(img)); } catch (e) { errs.push(e.message || String(e)); }
+    const why = []; // 原因調べ用：どの取り方が、なぜ失敗したか
+    const em = (e) => String((e && e.message) || e || '?').slice(0, 60);
+    try { return await loadDrawable(await getImageBlob(img, why)); } catch (e) { errs.push(e.message || String(e)); if (!/サイトの保護/.test(em(e))) why.push('①' + em(e)); }
     const d0 = drawableFromImg(img); // 同じドメイン・CORS許可の画像なら、表示中の絵をそのまま使える
     if (d0) return d0;
+    why.push('②表示中:不可');
     try { // 画像形式をブラウザが確実に読めるものに指定して取り直す（AVIFなどを読めないブラウザ向け）
       const r = await xhr({ method: 'GET', url: src, responseType: 'blob', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
       if (r.status >= 200 && r.status < 300 && r.response && r.response.size) return await loadDrawable(r.response);
-    } catch (e) { errs.push(e.message || String(e)); }
+      why.push('③blob:' + r.status + (r.response ? '' : ' 空'));
+    } catch (e) { errs.push(e.message || String(e)); why.push('③blob:' + em(e)); }
     try { // データを「文字」として受け取る昔ながらの方法（arraybuffer・blobに対応していない拡張・ブラウザ向け。iPhoneのOrionなど）
       const r = await xhr({ method: 'GET', url: src, overrideMimeType: 'text/plain; charset=x-user-defined', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
       if (r.status >= 200 && r.status < 300 && r.responseText) {
         const m = /content-type:\s*([^\r\n;]+)/i.exec(r.responseHeaders || '');
         return await loadDrawable(new Blob([binStrToBytes(r.responseText)], { type: m && /^image\//i.test(m[1]) ? m[1] : 'image/jpeg' }));
       }
-    } catch (e) { errs.push(e.message || String(e)); }
+      why.push('④文字:' + r.status + (r.responseText ? '' : ' 空'));
+    } catch (e) { errs.push(e.message || String(e)); why.push('④文字:' + em(e)); }
     try { // ページ側のfetch（サイトのログイン情報つき）
       const pf = (typeof unsafeWindow !== 'undefined' && unsafeWindow.fetch) ? unsafeWindow.fetch.bind(unsafeWindow) : fetch;
       const res = await pf(src, { credentials: 'include' });
       if (res.ok) return await loadDrawable(await res.blob());
-    } catch (e) { errs.push(e.message || String(e)); }
+      why.push('⑤ページ:' + res.status);
+    } catch (e) { errs.push(e.message || String(e)); why.push('⑤ページ:' + em(e)); }
     try { // CORSつきで読み込み直す（許可しているサイトなら読める）
       const im = new Image(); im.crossOrigin = 'anonymous';
       await new Promise((r, j) => { im.onload = r; im.onerror = j; im.src = src; });
       const d = drawableFromImg(im);
       if (d) return d;
-    } catch (e) { /* 読めない */ }
-    throw new Error('画像を読み込めませんでした（' + (errs[0] || 'サイトの保護') + '）');
+      why.push('⑥CORS:不可');
+    } catch (e) { why.push('⑥CORS:読込失敗'); }
+    let env = '';
+    try { const gi = typeof GM_info !== 'undefined' ? GM_info : null; if (gi) env = ' ' + (gi.scriptHandler || '?') + ' ' + (gi.version || ''); } catch (e) { /* なし */ }
+    let host = ''; try { host = new URL(src, location.href).host; } catch (e) { /* なし */ }
+    throw new Error('画像を読み込めませんでした［' + why.join(' ') + '｜' + host + env + '］');
   }
 
-  async function getImageBlob(img) {
+  async function getImageBlob(img, why) {
     const src = img.currentSrc || img.src;
+    const note = (t) => { if (why) why.push(t); };
     try {
       const r = await xhr({ method: 'GET', url: src, responseType: 'arraybuffer', headers: { Referer: location.href } });
       if (r.status >= 200 && r.status < 300 && r.response && (r.response.byteLength || r.response.size || r.response.length)) {
@@ -4695,7 +4706,8 @@ ${w.story || '（なし）'}
         const body = typeof r.response === 'string' ? binStrToBytes(r.response) : r.response;
         return new Blob([body], { type: m ? m[1] : 'image/jpeg' });
       }
-    } catch (e) {}
+      note('①GM:' + r.status + (r.response ? '' : ' 空'));
+    } catch (e) { note('①GM:' + String((e && e.message) || e).slice(0, 60)); }
     // 最後の手段: 表示中の画像から直接（同一オリジンかCORS許可時のみ）
     const c = document.createElement('canvas');
     c.width = img.naturalWidth; c.height = img.naturalHeight;
