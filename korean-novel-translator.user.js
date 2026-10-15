@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         韓国小説 丸ごと翻訳
 // @name:ja      イカ墨翻訳
-// @namespace    ikasumi-novel-tl
+// @namespace    kazu-novel-tl
 // @author       イカ墨
-// @version      10.5.75
+// @version      10.5.76
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -14,7 +14,6 @@
 // @exclude      *://*.google.com/*
 // @exclude      *://console.anthropic.com/*
 // @exclude      *://aistudio.google.com/*
-// @contributionURL https://ofuse.me/ikasumi
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -39,8 +38,6 @@
 // @connect      pstatic.net
 // @connect      *
 // @run-at       document-idle
-// @downloadURL  https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.user.js
-// @updateURL    https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.user.js
 // ==/UserScript==
 
 const KZ_SET = GM_setValue;
@@ -60,8 +57,8 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     } catch { return 'ja'; }
   })();
   const OUT_EN = OUT_LANG === 'en', OUT_ZH = OUT_LANG === 'zh', OUT_X = OUT_LANG !== 'ja';
-  // 訳文のコピー・HTML保存・ZIP保存：配布版では使えない（訳文の再配布などの悪用を防ぐため）
-  const EXPORT_OK = false;
+  // 訳文のコピー・HTML保存・ZIP保存：自分用はいつも使える
+  const EXPORT_OK = true;
   const EN_MAP = {
     // ボタン・パネル
     '閉じる': 'Close', '再翻訳': 'Retranslate', 'コピー': 'Copy', '設定': 'Settings', '作品ごとに保存': 'Save by work',
@@ -475,6 +472,8 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   const alert = (m) => KZ_ALERT(trUI(m));
   const confirm = (m) => KZ_CONFIRM(trUI(m));
   const GM_registerMenuCommand = (name, fn) => KZ_MENU(trUI(name), fn);
+  // 無料キー（Geminiの無料枠）機能。人に渡す版では false
+  const FREE_KEY_FEATURE = true;
   // 訳の記録が変わったら、クラウドへの自動バックアップの印を付ける
   let backupDirty = false, backupTimer = 0;
   const GM_setValue = (k, v) => {
@@ -609,7 +608,8 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     if (c.key && !(p in c.keys)) c.keys[p] = c.key;
     if (c.model && !(p in c.models)) c.models[p] = c.model;
     if (c.fallback && !(p in c.fallbacks)) c.fallbacks[p] = c.fallback;
-    c.key = c.keys[p] || ''; c.model = c.models[p] || ''; c.fallback = c.fallbacks[p] || ''; c.sheetModel = c.sheetModels[p] || '';
+    c.freeKey = FREE_KEY_FEATURE ? (c.freeKey || '').trim() : '';
+    c.key = c.keys[p] || (p === 'gemini' ? c.freeKey : '') || ''; c.model = c.models[p] || ''; c.fallback = c.fallbacks[p] || ''; c.sheetModel = c.sheetModels[p] || '';
     return c;
   };
 
@@ -974,6 +974,18 @@ Rules:
     return { text };
   };
 
+  // ---------- 無料キー（課金していないプロジェクトのGeminiキー）----------
+  // 無料枠はアメリカ西海岸の0時に戻る
+  const ptDay = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  let freeBad = false;
+  const freeOut = model => freeBad || (GM_getValue('freeOut', {})[model] === ptDay());
+  const setFreeOut = model => { const v = GM_getValue('freeOut', {}); v[model] = ptDay(); KZ_SET('freeOut', v); };
+  function keyStat(kind) {
+    const v = GM_getValue('keyStat', {}); const d = ptDay();
+    if (v.day !== d) { v.day = d; v.free = 0; v.paid = 0; }
+    v[kind] = (v[kind] || 0) + 1; KZ_SET('keyStat', v);
+  }
+
   async function llm(c, system, user, modelOverride, onText) {
     const model = modelOverride || c.model.trim() || MODELS[c.provider];
     const ctx = user && typeof user === 'object' ? user.ctx : '';
@@ -988,7 +1000,10 @@ Rules:
       // 小説の翻訳なので、成人向け表現のブロックを外せるようにする（未成年に関わる内容などはGoogle側で常にブロック）
       const safetySettings = c.adult ? ['HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_HATE_SPEECH',
         'HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_DANGEROUS_CONTENT'].map(category => ({ category, threshold: 'BLOCK_NONE' })) : undefined;
-      const key = c.key;
+      // 無料キーがあれば先に使い、今日の無料枠が切れたら課金キーへ
+      let key = c.key;
+      const free = c.freeKey && c.freeKey !== c.key && !freeOut(model) ? c.freeKey : '';
+      if (free) key = free;
       const call = () => req(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
         { 'x-goog-api-key': key }, {
           systemInstruction: { parts: [{ text: system }] },
@@ -997,7 +1012,24 @@ Rules:
           safetySettings,
         }, { parse: parseGemini, onText });
       let j;
-      try { j = await call(); }
+      const callKey = async () => {
+        if (!free) return call();
+        try {
+          const r = await call();
+          if (!r.err) { keyStat('free'); return r; }
+          throw new Error((r.err.code || 500) + ': ' + (r.err.message || 'error'));
+        } catch (e) {
+          const code = +((e.message.match(/^(\d{3})/) || [])[1] || 0);
+          if (![429, 400, 401, 403].includes(code)) throw e;
+          if (code === 429 && /per ?day|PerDay|daily/i.test(e.message)) {
+            setFreeOut(model);
+            ui.toast('今日の無料枠を使い切ったので、課金キーに切り替えました', 4000);
+          } else if (code !== 429) freeBad = true; // 無料キーが間違っているときは今回は使わない
+          key = c.key; // 1分あたりの上限などは、この回だけ課金キーで
+          const r = await call(); keyStat('paid'); return r;
+        }
+      };
+      try { j = await callKey(); }
       catch (e) {
         if (!(/^400/.test(e.message) && /think/i.test(e.message)) || !gc.thinkingConfig) throw e;
         // minimalが使えないモデルならlowで再送
@@ -1122,7 +1154,7 @@ Rules:
   // この作品で最後に訳した話の終わりの部分。次の話を訳すとき、話の続きとして文体・呼称をそろえるのに使う
   const tailKey = () => 'tail:' + workKey();
   function saveTail(text) {
-    const t = String(text || '').replace(/<\/?t\d+\/?>/g, '').trim();
+    const t = String(text || '').replace(/<\/?t\d+\/?>/g, '').replace(/^【挿絵あり（\d+枚）】\n*/, '').trim(); // 挿絵ありの印は前の話の流れに入れない
     if (t) GM_setValue(tailKey(), { ep: pageId(), text: t.slice(-1500), at: Date.now() });
   }
   // 段落ごとの訳の記録（作品ごと）。ページの作りが端末で違っても、同じ段落なら記録から出せる
@@ -1342,7 +1374,9 @@ Rules:
       return wrap.innerHTML;
     });
     const src = firstEl;
-    const bodyHtml = parts.join('\n<div style="height:2em"></div>\n');
+    let nIl = 0;
+    try { nIl = layoutLines(ctx).filter(x => x.illust).length; } catch { /* 数えられなければ印なし */ }
+    const bodyHtml = (nIl ? `<p style="margin:0 0 1.5em;color:#999">${escHtml(illustNote(nIl))}</p>\n` : '') + parts.join('\n<div style="height:2em"></div>\n');
     const title = pageTitle().replace(/\s+/g, ' ').trim() || 'translation';
     const esc = t => t.replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
     const w = Math.round(src.getBoundingClientRect().width) || 720;
@@ -1446,8 +1480,12 @@ ${bodyHtml}
     return res;
   }
 
+  // 挿絵のある話は、書き出し・コピーの先頭に印を付ける（挿絵の位置は前後することがあるため）
+  const illustNote = n => `【挿絵あり（${n}枚）】`;
   function buildCopy(ctx) {
-    return layoutLines(ctx).map((x, k) => (k ? '\n' + '\n'.repeat(x.blanks) : '') + x.text).join('');
+    const lines = layoutLines(ctx);
+    const n = lines.filter(x => x.illust).length;
+    return (n ? illustNote(n) + '\n\n' : '') + lines.map((x, k) => (k ? '\n' + '\n'.repeat(x.blanks) : '') + x.text).join('');
   }
 
   // ---------- 小説リーダー用のデータ（保存したHTMLに埋め込む） ----------
@@ -1513,6 +1551,8 @@ ${bodyHtml}
       if (Math.abs(ratio - 1) > 0.05) para.sizeRatio = Math.round(ratio * 100) / 100;
       paras.push(para);
     });
+    const nIl = lines.filter(x => x.illust).length;
+    if (nIl) paras.unshift({ html: escHtml(illustNote(nIl)), text: illustNote(nIl), color: 'rgb(150, 150, 150)' }, { blank: true });
     return { v: 1, title: pageTitle().replace(/\s+/g, ' ').trim(), source: location.href, baseSize, paras };
   }
   async function translate(force) {
@@ -2125,7 +2165,8 @@ ${bodyHtml}
       lastS = scene;
       addIllust(src);
     }
-    return out.replace(/\n+$/, '');
+    const nIl = Object.values((liveData && liveData.illust) || {}).filter(x => x && x.text).length;
+    return (nIl && out ? illustNote(nIl) + '\n\n' : '') + out.replace(/\n+$/, '');
   }
 
   // ページは書き換えず、保存用に装飾つきの訳文HTMLと配置だけ記録する
@@ -2547,6 +2588,11 @@ ${bodyHtml}
         body += markHtml + `<div style="margin:1em 0;text-align:center">${x.html}</div>\n` + markHtml;
       }
     };
+    const nIl = Object.values(liveData.illust || {}).filter(x => x && x.text).length;
+    if (nIl) {
+      paras.push({ html: escHtml(illustNote(nIl)), text: illustNote(nIl), color: 'rgb(150, 150, 150)' }, { blank: true });
+      body += `<p style="margin:0 0 .6em;color:#999">${escHtml(illustNote(nIl))}</p>\n<p style="margin:0;height:${blankH}"></p>\n`;
+    }
     addIllust('');
     for (const { src: k, scene, lay } of seq) {
       const meta = liveData.meta[k] || {};
@@ -2857,7 +2903,7 @@ ${body}</main></body></html>`;
     if (remote && typeof remote === 'object') for (const [k, v] of Object.entries(remote)) if (DATA_PREFIX.test(k)) data[k] = mergeValue(k, data[k] ?? null, v);
     // 設定（用語集・指示・モデルなど）も一緒に。APIキーとGitHubの鍵は入れない
     const settings = Object.assign({}, GM_getValue('cfg', {}));
-    delete settings.keys; delete settings.key; delete settings.gistToken; delete settings.gistId;
+    delete settings.keys; delete settings.key; delete settings.gistToken; delete settings.gistId; delete settings.freeKey;
     return { json: JSON.stringify({ kztl: 1, exportedAt: new Date().toISOString(), data, settings }), n: Object.keys(data).length };
   }
 
@@ -2984,7 +3030,7 @@ ${body}</main></body></html>`;
     let setMsg = '';
     if (j.settings && typeof j.settings === 'object') {
       const cur = GM_getValue('cfg', {});
-      const inc = Object.assign({}, j.settings); delete inc.keys; delete inc.key; delete inc.gistToken; delete inc.gistId;
+      const inc = Object.assign({}, j.settings); delete inc.keys; delete inc.key; delete inc.gistToken; delete inc.gistId; delete inc.freeKey;
       // こっちの端末のAPIキー・GitHubの鍵はそのまま残す
       KZ_SET('cfg', Object.assign({}, cur, inc, { keys: cur.keys || {} }));
       setMsg = '・設定も反映';
@@ -3170,6 +3216,7 @@ ${body}</main></body></html>`;
               <option value="openai">OpenAI互換（DeepSeekなど）</option>
             </select></label>
           <label>APIキー（エンジンごとに保存） <input name="key" type="password" autocomplete="off"></label>
+          <label class="freekey">Geminiの無料キー（課金していないプロジェクトのキー。先にこっちを使い、今日の無料枠が切れたら上の課金キーに自動で切り替え） <input name="freeKey" type="password" autocomplete="off" placeholder="空欄なら使わない"></label>
           <label>モデル名（空欄で既定） <input name="model"></label>
           <label>一覧から選ぶ <select name="modelPick"><option value="">（選ぶとモデル名に入ります）</option></select></label>
           <label>予備モデル（混雑時に順番に切り替え。カンマ区切り、空欄で既定） <input name="fallback"></label>
@@ -3297,6 +3344,8 @@ ${body}</main></body></html>`;
       f('fallback').placeholder = FALLBACKS[c.provider] || trUI('なし');
       f('adult').checked = !!c.adult;
       f('imgChar').value = c.imgChar || '';
+      f('freeKey').value = c.freeKey || '';
+      if (!FREE_KEY_FEATURE) f('freeKey').closest('label').remove();
       f('jaFont').checked = c.jaFont !== false;
       f('outLang').value = OUT_LANG; f('illust').checked = c.illust !== false; f('autoMode').checked = c.autoMode !== false;
       f('gistToken').value = c.gistToken || ''; f('autoBackup').checked = c.autoBackup !== false;
@@ -3512,7 +3561,7 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), freeKey: FREE_KEY_FEATURE ? (form.querySelector('[name=freeKey]')?.value || '').trim() : '', jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
         if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
@@ -3685,6 +3734,7 @@ ${body}</main></body></html>`;
   GM_registerMenuCommand('診断（ボタンが出ないとき）', () => {
     const L = [];
     L.push('場所: ' + location.host + location.pathname.slice(0, 40));
+    { const ks = GM_getValue('keyStat', {}); if (ks.day) L.push(`今日のGemini: 無料キー ${ks.free || 0}回・課金キー ${ks.paid || 0}回${freeOut(cfg().model || MODELS.gemini) ? '（無料枠切れ）' : ''}`); }
     L.push('フレーム: ' + (window.top === window.self ? 'ページ本体' : 'iframeの中'));
     L.push('本体の韓国語: ' + ko(document.body?.textContent) + '字');
     let sh = 0, shk = 0;
@@ -3823,7 +3873,7 @@ ${body}</main></body></html>`;
   // ================= WT（まんが・ウェブトゥーン）翻訳モード =================
   // 画像の吹き出しを読み取って、訳を吹き出しの上に重ねる。サイトごとにオン／オフ（メニュー・設定から）
   function wtKey() { return 'wt:' + location.hostname; } // 起動中の check() からも呼ばれるので、先に使える形にしておく
-  const novelGeminiKey = () => { try { const c = cfg(); return (c.keys && c.keys.gemini) || ''; } catch { return ''; } };
+  const novelGeminiKey = () => { try { const c = cfg(); return (c.keys && c.keys.gemini) || c.freeKey || ''; } catch { return ''; } };
   const novelGistToken = () => { try { return GM_getValue('cfg', {}).gistToken || ''; } catch { return ''; } };
   // 起動中の check() が先にWTを動かしていることがあるので、ここでは上書きしない（上書きすると2つ目が動いてしまう）
   var wtStarted, wtApi, wtSeenPage, wtPageNow;
