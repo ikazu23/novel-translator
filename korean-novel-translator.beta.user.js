@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.74
+// @version      10.5.75
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -4663,12 +4663,15 @@ ${w.story || '（なし）'}
     if (d0) return d0;
     why.push('②表示中:不可');
     try { // 画像形式をブラウザが確実に読めるものに指定して取り直す（AVIFなどを読めないブラウザ向け）
-      const r = await xhr({ method: 'GET', url: src, responseType: 'blob', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
+      let r = await xhr({ method: 'GET', url: src, responseType: 'blob', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
+      // 形式の指定を断るサイト（406。カカオページなど）は、指定なしで取り直す
+      if (r.status === 406) r = await xhr({ method: 'GET', url: src, responseType: 'blob', headers: { Referer: location.href } });
       if (r.status >= 200 && r.status < 300 && r.response && r.response.size) return await loadDrawable(r.response);
       why.push('③blob:' + r.status + (r.response ? '' : ' 空'));
     } catch (e) { errs.push(e.message || String(e)); why.push('③blob:' + em(e)); }
     try { // データを「文字」として受け取る昔ながらの方法（arraybuffer・blobに対応していない拡張・ブラウザ向け。iPhoneのOrionなど）
-      const r = await xhr({ method: 'GET', url: src, overrideMimeType: 'text/plain; charset=x-user-defined', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
+      let r = await xhr({ method: 'GET', url: src, overrideMimeType: 'text/plain; charset=x-user-defined', headers: { Referer: location.href, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' } });
+      if (r.status === 406) r = await xhr({ method: 'GET', url: src, overrideMimeType: 'text/plain; charset=x-user-defined', headers: { Referer: location.href } });
       if (r.status >= 200 && r.status < 300 && r.responseText) {
         const m = /content-type:\s*([^\r\n;]+)/i.exec(r.responseHeaders || '');
         return await loadDrawable(new Blob([binStrToBytes(r.responseText)], { type: m && /^image\//i.test(m[1]) ? m[1] : 'image/jpeg' }));
