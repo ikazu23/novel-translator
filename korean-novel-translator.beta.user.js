@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.75
+// @version      10.5.77
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -6302,11 +6302,18 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
   function eligible(img) {
     if (!img.isConnected || img.closest('.ezc-ov')) return false;
     if (!img.complete || !img.naturalWidth) return false;
+    if (illustMode()) {
+      // 小説モードの挿絵：本文の幅いっぱいくらいの大きな絵（表紙の小さな絵・広告のリンク画像は訳さない）
+      if (img.closest('a')) return false;
+      const r = img.getBoundingClientRect();
+      const big = img.naturalWidth >= S.minSize && img.naturalHeight >= S.minSize && r.width >= Math.min(300, innerWidth * 0.6) && r.height >= 100;
+      // 文字を画像にした1行（「足音を立てるな」のような横長で背の低い画像。カカオページなど）。四角いアイコンは入れない
+      const line = img.naturalWidth >= 120 && img.naturalHeight >= 16 && r.width >= Math.min(140, innerWidth * 0.3) && r.height >= 16 && r.width / r.height >= 2.5;
+      return big || line;
+    }
     if (img.naturalWidth < S.minSize || img.naturalHeight < S.minSize) return false;
     const r = img.getBoundingClientRect();
     if (r.width < 150 || r.height < 100) return false;
-    // 小説モードの挿絵：本文の幅いっぱいくらいの大きな絵だけ（表紙の小さな絵・広告のリンク画像は訳さない）
-    if (illustMode() && (r.width < Math.min(300, innerWidth * 0.6) || img.closest('a'))) return false;
     return true;
   }
 
