@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.96
+// @version      10.5.97
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -589,9 +589,9 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     return d.kztlWork ? [d.kztlTitle, d.kztlEpTitle].filter(Boolean).join(' ') || document.title : document.title;
   };
 
-  const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-chat' };
+  const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash' };
   // 一覧に出す候補
-  const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'] };
+  const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'] };
   // 混雑時の予備（賢いモデルのみ。Lite系は入れない）
   const FALLBACKS = { gemini: 'gemini-3-flash-preview, gemini-2.5-flash', claude: '', openai: '' };
   // 作品メモの更新に使う安いモデル（空欄なら翻訳と同じモデル）
@@ -609,6 +609,9 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     if (c.key && !(p in c.keys)) c.keys[p] = c.key;
     if (c.model && !(p in c.models)) c.models[p] = c.model;
     if (c.fallback && !(p in c.fallbacks)) c.fallbacks[p] = c.fallback;
+    // DeepSeekの古いモデル名（2026年7月で終了）は新しい名前に読み替える
+    const dsOld = { 'deepseek-chat': 'deepseek-flash', 'deepseek-reasoner': 'deepseek-v4-pro' };
+    for (const o of [c.models, c.fallbacks, c.sheetModels]) if (typeof o.openai === 'string') o.openai = o.openai.replace(/(^|[,\s])(deepseek-chat|deepseek-reasoner)(?=$|[,\s])/g, (m, a, b) => a + dsOld[b]);
     c.key = c.keys[p] || ''; c.model = c.models[p] || ''; c.fallback = c.fallbacks[p] || ''; c.sheetModel = c.sheetModels[p] || '';
     return c;
   };
