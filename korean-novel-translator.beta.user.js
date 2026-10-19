@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.77
+// @version      10.5.86
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -116,7 +116,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     '翻訳メモ（人物の訳名・性別・一人称・口調、用語。作品ごと）': 'Translation notes (character names, gender, pronouns, tone, terms; per work)', '訳した内容からメモを自動で更新': 'Update notes automatically from translations',
     '訳の記録・バックアップ（全作品）': 'Records & backup (all works)', 'クラウドに自動バックアップ（GitHubのトークン。空欄なら小説翻訳の設定のトークンを使う）': 'Automatic cloud backup (GitHub token; blank = use the Novel token)',
     '訳が増えたら自動でクラウドに保存': 'Save to the cloud automatically when translations are added', 'クラウドに保存': 'Save to cloud', 'ファイルに書き出す': 'Export to file', 'ファイルを読み込む': 'Import file',
-    'ボタンのタップ＝このサイトで翻訳ON/OFF、長押し＝この画面、ドラッグ＝移動。訳をタップすると原文が見える。': 'Tap the button = translation ON/OFF, long press = settings, drag = move. Tap a translation to see the original.',
+    'ボタンのタップ＝このサイトで翻訳ON/OFF、ドラッグ＝移動。設定は⚙ボタン。訳をタップすると原文が見える。': 'Tap the button = translation ON/OFF, drag = move. Settings: ⚙ button. Tap a translation to see the original.',
     '保存した訳を全部消す': 'Delete all saved translations',
     // メニュー
     '設定を開く': 'Open settings', 'この話を翻訳し直す（上書き表示）': 'Retranslate this chapter', '訳したページをHTMLで保存': 'Save translated page as HTML', 'ボタンの位置をリセット': 'Reset button position',
@@ -153,7 +153,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     'APIキーを入れてね': 'Please enter your API key', 'メモに足す新しいセリフがまだない': 'No new lines to add to the notes yet', '翻訳メモを更新中…': 'Updating translation notes…',
     '翻訳メモを更新した': 'Translation notes updated', '設定でGitHubのトークンを入れてね': 'Enter your GitHub token in Settings', 'クラウドに保存中': 'Saving to the cloud…',
     'クラウドにバックアップが見つからない': 'No backup found in the cloud', '読み込めない：ファイルの形式が違う': 'Cannot import: wrong file format',
-    '読み込めない：このスクリプトの書き出しファイルじゃない': 'Cannot import: not an export file of this script', 'APIキー未設定（WTボタン長押しで設定）': 'No API key (long-press WT to open settings)',
+    '読み込めない：このスクリプトの書き出しファイルじゃない': 'Cannot import: not an export file of this script', 'APIキー未設定（⚙ボタンから設定）': 'No API key (open settings with the ⚙ button)',
     'モデル未設定': 'No model set', '回数制限のため待機中…': 'Waiting for rate limit…', '翻訳待ち…': 'Waiting…', '翻訳中…': 'Translating…', '止めました': 'Stopped',
     '原文に戻した': 'Back to the original', '先にGeminiのAPIキーを入れてね': 'Enter your Gemini API key first', 'このページを翻訳する': 'Translating this page',
     '保存した': 'Saved', 'この話の画像（挿絵）の保存した訳を消す？（ほかの話・クラウドのバックアップは残る）': 'Delete saved translations for this chapter\'s images? (other chapters and cloud backup are kept)',
@@ -286,7 +286,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     "クラウドに保存": "保存到云端",
     "ファイルに書き出す": "导出到文件",
     "ファイルを読み込む": "导入文件",
-    "ボタンのタップ＝このサイトで翻訳ON/OFF、長押し＝この画面、ドラッグ＝移動。訳をタップすると原文が見える。": "点按按钮＝本网站翻译开/关，长按＝设置，拖动＝移动。点按译文可查看原文。",
+    "ボタンのタップ＝このサイトで翻訳ON/OFF、ドラッグ＝移動。設定は⚙ボタン。訳をタップすると原文が見える。": "点按按钮＝本网站翻译开/关，拖动＝移动。设置：⚙按钮。点按译文可查看原文。",
     "保存した訳を全部消す": "删除全部已保存的译文",
     "設定を開く": "打开设置",
     "この話を翻訳し直す（上書き表示）": "重新翻译本章",
@@ -354,7 +354,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     "クラウドにバックアップが見つからない": "云端没有找到备份",
     "読み込めない：ファイルの形式が違う": "无法导入：文件格式不对",
     "読み込めない：このスクリプトの書き出しファイルじゃない": "无法导入：不是本脚本导出的文件",
-    "APIキー未設定（WTボタン長押しで設定）": "未设置API密钥（长按WT按钮打开设置）",
+    "APIキー未設定（⚙ボタンから設定）": "未设置API密钥（点⚙按钮打开设置）",
     "モデル未設定": "未设置模型",
     "回数制限のため待機中…": "等待频率限制…",
     "翻訳待ち…": "等待翻译…",
@@ -1122,7 +1122,7 @@ Rules:
   // この作品で最後に訳した話の終わりの部分。次の話を訳すとき、話の続きとして文体・呼称をそろえるのに使う
   const tailKey = () => 'tail:' + workKey();
   function saveTail(text) {
-    const t = String(text || '').replace(/<\/?t\d+\/?>/g, '').trim();
+    const t = String(text || '').replace(/<\/?t\d+\/?>/g, '').replace(/^【挿絵あり[^】]*】\n*/, '').trim(); // 挿絵ありの印は前の話の流れに入れない
     if (t) GM_setValue(tailKey(), { ep: pageId(), text: t.slice(-1500), at: Date.now() });
   }
   // 段落ごとの訳の記録（作品ごと）。ページの作りが端末で違っても、同じ段落なら記録から出せる
@@ -1342,7 +1342,7 @@ Rules:
       return wrap.innerHTML;
     });
     const src = firstEl;
-    const bodyHtml = parts.join('\n<div style="height:2em"></div>\n');
+    const bodyHtml = (ilMarked() ? `<p style="margin:0 0 1.5em;color:#999">${escHtml(IL_NOTE)}</p>\n` : '') + parts.join('\n<div style="height:2em"></div>\n');
     const title = pageTitle().replace(/\s+/g, ' ').trim() || 'translation';
     const esc = t => t.replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
     const w = Math.round(src.getBoundingClientRect().width) || 720;
@@ -1446,8 +1446,22 @@ ${bodyHtml}
     return res;
   }
 
+  // 「挿絵あり」の印：自分で付けた話だけ、先頭に入れる（「訳」ボタンの長押しで切り替え。イカ墨ノベルに送る話・保存・コピー）
+  const IL_NOTE = '【挿絵あり】';
+  const ilKey = () => 'ilmark:' + workKey() + '|' + pageId();
+  const ilMarked = () => { try { return !OUT_X && !!GM_getValue(ilKey(), false); } catch { return false; } };
+  const ilNotePara = () => ({ html: escHtml(IL_NOTE), text: IL_NOTE, color: 'rgb(150, 150, 150)', ilNote: true });
+  function toggleIlMark() {
+    if (OUT_X) return; // 日本語に訳すときだけ（イカ墨ノベル用）
+    const v = !ilMarked();
+    if (v) GM_setValue(ilKey(), true); else GM_deleteValue(ilKey());
+    try { ui.ilMark(v); } catch { /* ボタンなし */ }
+    try { if (liveData && liveData.key === liveKey() && liveEntries().length) setLast(liveText()); } catch { /* まだ訳していない */ }
+    snapLater();
+    ui.toast(v ? (EXPORT_OK ? 'この話を「挿絵あり」にしました（保存・コピー・イカ墨ノベルに送る話の最初に入ります）' : 'この話を「挿絵あり」にしました（イカ墨ノベルに送る話の最初に入ります）') : '「挿絵あり」を解除しました', 3000);
+  }
   function buildCopy(ctx) {
-    return layoutLines(ctx).map((x, k) => (k ? '\n' + '\n'.repeat(x.blanks) : '') + x.text).join('');
+    return (ilMarked() ? IL_NOTE + '\n\n' : '') + layoutLines(ctx).map((x, k) => (k ? '\n' + '\n'.repeat(x.blanks) : '') + x.text).join('');
   }
 
   // ---------- 小説リーダー用のデータ（保存したHTMLに埋め込む） ----------
@@ -1513,6 +1527,7 @@ ${bodyHtml}
       if (Math.abs(ratio - 1) > 0.05) para.sizeRatio = Math.round(ratio * 100) / 100;
       paras.push(para);
     });
+    if (ilMarked()) paras.unshift(ilNotePara(), { blank: true });
     return { v: 1, title: pageTitle().replace(/\s+/g, ' ').trim(), source: location.href, baseSize, paras };
   }
   async function translate(force) {
@@ -2125,7 +2140,7 @@ ${bodyHtml}
       lastS = scene;
       addIllust(src);
     }
-    return out.replace(/\n+$/, '');
+    return (ilMarked() && out ? IL_NOTE + '\n\n' : '') + out.replace(/\n+$/, '');
   }
 
   // ページは書き換えず、保存用に装飾つきの訳文HTMLと配置だけ記録する
@@ -2547,6 +2562,10 @@ ${bodyHtml}
         body += markHtml + `<div style="margin:1em 0;text-align:center">${x.html}</div>\n` + markHtml;
       }
     };
+    if (ilMarked()) {
+      paras.push(ilNotePara(), { blank: true });
+      body += `<p style="margin:0 0 .6em;color:#999">${escHtml(IL_NOTE)}</p>\n<p style="margin:0;height:${blankH}"></p>\n`;
+    }
     addIllust('');
     for (const { src: k, scene, lay } of seq) {
       const meta = liveData.meta[k] || {};
@@ -2605,7 +2624,7 @@ ${body}</main></body></html>`;
       else if (copyCtx && copyCtx.href === pageId() && inPlaceOn) data = episodeData(copyCtx);
       if (!data || !data.paras || !data.paras.length) return;
       const k = epKey(), old = GM_getValue(k, null);
-      const n = data.paras.filter(x => !x.blank).length;
+      const n = data.paras.filter(x => !x.blank && !x.ilNote).length; // 「挿絵あり」の印は数えない（付け外ししても控えを入れ替えられるように）
       if (old && old.n > n) return; // 途中までしか表示されていないときは、前の多い方を残す
       GM_setValue(k, { work: workName(), wk: workKey(), title: data.title, num: epNum(data.title), prov: prov(), at: Date.now(), n, data });
     } catch { /* 控えられなくても翻訳は続ける */ }
@@ -3110,6 +3129,8 @@ ${body}</main></body></html>`;
       .fab.gear { grid-column: 1; grid-row: 2; font-size: 19px; }
       .fab.save { grid-column: 1; grid-row: 1; }
       .fab.copy { grid-column: 2; grid-row: 1; }
+      .ildot { grid-column: 2; grid-row: 2; align-self: start; justify-self: end; width: 11px; height: 11px; margin: 1px; border-radius: 50%; background: #ff5a7a; box-shadow: 0 0 0 2px #fff; z-index: 2; pointer-events: none; }
+      .ildot[hidden], .dock.wt .ildot { display: none; }
       .text { user-select: text; -webkit-user-select: text; }
       .card { position: fixed; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom, 0px) + 130px); z-index: 2147483646;
         max-height: 40vh; overflow: auto; padding: 14px 40px 14px 16px; border-radius: 12px; background: rgba(255,255,255,.97);
@@ -3248,6 +3269,7 @@ ${body}</main></body></html>`;
       <button class="fab sub copy" title="訳文をコピー" hidden>写</button>
       <button class="fab sub gear" title="設定">⚙</button>
       <button class="fab main" title="この話を翻訳（ドラッグで移動）">訳</button>
+      <i class="ildot" hidden></i>
     </div>
     <div class="ov-layer"></div>
     <div class="toast" hidden></div>
@@ -3342,7 +3364,7 @@ ${body}</main></body></html>`;
       fillModels();
     });
 
-    // タップで翻訳。設定は ⚙ ボタン（または「訳」の長押し）
+    // タップで翻訳。設定は ⚙ ボタン
     const openSettings = tab => {
       try { if (pd && pd.documentElement) pd.documentElement.style.zoom = uiScale > 1.05 ? String(uiScale) : ''; } catch { /* そのまま */ }
       panel.hidden = false; fab.hidden = true; copyBtn.hidden = true; saveBtn.hidden = true; gearBtn.hidden = true;
@@ -3408,7 +3430,13 @@ ${body}</main></body></html>`;
       if (file && wtReady()) wtApi.importText(await file.text());
       inp.value = '';
     });
-    fab.addEventListener('click', () => {
+    // 長押し＝この話の「挿絵あり」を切り替え（設定は⚙ボタンから）
+    let ilT = 0, ilLong = false, ilX = 0, ilY = 0;
+    fab.addEventListener('pointerdown', e => { ilLong = false; ilX = e.clientX; ilY = e.clientY; clearTimeout(ilT); ilT = setTimeout(() => { if (!moved) { ilLong = true; toggleIlMark(); } }, 600); });
+    fab.addEventListener('pointermove', e => { if (Math.abs(e.clientX - ilX) + Math.abs(e.clientY - ilY) > 10) clearTimeout(ilT); }); // 動かしたら長押しにしない
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => fab.addEventListener(ev, () => clearTimeout(ilT)));
+    fab.addEventListener('click', e => {
+      if (ilLong) { ilLong = false; e.preventDefault(); return; } // 長押しのあとの指離しでは翻訳しない
       // 押したことがすぐ分かるように：軽く振動して、光の輪を出す。訳している最中なら小さく揺れる
       try { navigator.vibrate && navigator.vibrate(12); } catch { /* 振動なし */ }
       const busyNow = busy || liveBusy;
@@ -3418,7 +3446,7 @@ ${body}</main></body></html>`;
       if (cfg().mode === 'inplace') translateInPlace(false); else translate(false);
       setTimeout(syncLabel, 900);
     });
-    fab.addEventListener('contextmenu', e => { e.preventDefault(); if (!moved) openSettings(); });
+    fab.addEventListener('contextmenu', e => e.preventDefault());
     gearBtn.addEventListener('click', openSettings);
 
     // ドラッグで移動（位置はサイトごとに保存）
@@ -3597,6 +3625,7 @@ ${body}</main></body></html>`;
           end: () => { if (st && st.pos) GM_setValue(posKey, st.pos); st = null; },
         };
       })(),
+      ilMark: v => { const d = root.querySelector('.ildot'); if (d) d.hidden = !v; },
       canCopy: v => { hasCopy = v && EXPORT_OK; copyBtn.hidden = !hasCopy || fab.hidden; saveBtn.hidden = !hasCopy || fab.hidden || !canSave(); },
       openSettings: tab => openSettings(tab),
       isOpen: () => !panel.hidden,
@@ -3624,6 +3653,7 @@ ${body}</main></body></html>`;
   let scanId = '', scanLeft = 0, scanHit = false, scanTick = 0;
   const snapDone = new Set();
   const check = () => {
+    try { ui.ilMark(ilMarked()); } catch { /* ボタンなし */ }
     if ((inPlaceOn || textApplied.size) && !busy && !snapDone.has(pageId() + prov())) { snapDone.add(pageId() + prov()); snapLater(); }
     if (liveData && liveData.key !== liveKey()) clearOverlays(); // 別の話に移ったら重ね表示を外す
     if (!overlays.length && !inPlaceOn && !shownTranslated().length && ui.fabText() === '原' && !illustByTap) ui.fabLabel('訳');
@@ -3769,6 +3799,51 @@ ${body}</main></body></html>`;
     ui.toast(`原文の言語：${LANG_OPT[next]}${next === 'auto' ? `（今のページは${LANGS[now].name}と判定）` : ''}`, 3500);
   });
   if (EXPORT_OK) GM_registerMenuCommand('作品ごとに全話まとめて保存（ZIP）', showWorkList);
+  // ---------- イカ墨ノベルへ訳した話を渡す ----------
+  // イカ墨ノベル（ikazu23.github.io）を開くと、この端末で訳した話のうち、まだ渡していない話（または前より先まで訳した話）を渡す。
+  // 受け取ったという返事が来た話だけ「渡した」と覚える。ほかのサイトでは何もしない
+  function novelHandoff() {
+    if (OUT_X || window.top !== window.self || location.host !== 'ikazu23.github.io') return;
+    const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const post = o => { try { W.postMessage('kztlNovel:' + JSON.stringify(o), location.origin); } catch (e) { /* 渡せない */ } };
+    let lastSend = 0;
+    const sendAll = () => {
+      if (Date.now() - lastSend < 3000) return; // 合図が続けて来ても1回だけ
+      lastSend = Date.now();
+      const sent = GM_getValue('novelSent', {});
+      const best = new Map(); // 話ごとに1つ（エンジン別に複数あれば新しい方）
+      for (const k of GM_listValues()) {
+        if (!k.startsWith('ep:')) continue;
+        const v = GM_getValue(k, null);
+        if (!v || !v.data || !Array.isArray(v.data.paras) || !v.wk) continue;
+        if (/ikazu23\.github\.io/.test(String(v.data.source || '') + k)) continue; // イカ墨ノベルの中で訳した話は送り返さない
+        const page = k.slice(3).replace(/@[^@]*$/, '');
+        const o = best.get(page);
+        if (!o || (v.at || 0) > (o.at || 0)) best.set(page, Object.assign({ page }, v));
+      }
+      const eps = [];
+      for (const v of best.values()) {
+        const s0 = sent[v.page];
+        if (s0 && (s0.n || 0) >= (v.n || 0)) continue;
+        eps.push({ key: v.page, wk: v.wk, work: v.work, title: v.title, num: v.num, n: v.n || 0, at: v.at, data: v.data });
+      }
+      if (eps.length) post({ type: 'send', eps });
+      else if (!best.size && !sendAll.told) { sendAll.told = true; try { ui.toast('イカ墨翻訳：この端末で訳した話の控えがまだありません（訳した話を開いて「訳」を押すと控えられます）', 5000); } catch (e) { /* 表示できない */ } }
+    };
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || typeof e.data !== 'string' || !e.data.startsWith('kztlNovel:')) return;
+      let d; try { d = JSON.parse(e.data.slice(10)); } catch (_) { return; }
+      if (!d) return;
+      if (d.type === 'hello') sendAll();
+      if (d.type === 'ack' && Array.isArray(d.items)) {
+        const sent = GM_getValue('novelSent', {});
+        d.items.forEach(a => { if (a && a.key) sent[a.key] = { n: a.n || 0, at: Date.now() }; });
+        GM_setValue('novelSent', sent);
+      }
+    });
+    setTimeout(sendAll, 1500);
+  }
+  try { novelHandoff(); } catch (e) { /* イカ墨ノベルに渡せなくても続ける */ }
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
@@ -4831,7 +4906,7 @@ ${namesRule}- 原文がすでに${t}なら tr は原文のまま。
   }
 
   async function geminiRaw(parts, generationConfig, onWait) {
-    if (!keyOf()) throw new Error('APIキー未設定（WTボタン長押しで設定）');
+    if (!keyOf()) throw new Error('APIキー未設定（⚙ボタンから設定）');
     // 漫画の暴力表現・叫び（「살려」など）で返事を止められないように、安全フィルターをゆるめる
     const safetySettings = ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
       .map((category) => ({ category, threshold: 'BLOCK_NONE' }));
@@ -7087,7 +7162,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     <button id="im">ファイルを読み込む</button>
     <input type="file" id="imf" accept=".json,application/json" hidden>
   </div>
-  <div class="hint">ボタンのタップ＝このサイトで翻訳ON/OFF、長押し＝この画面、ドラッグ＝移動。訳をタップすると原文が見える。</div>
+  <div class="hint">ボタンのタップ＝このサイトで翻訳ON/OFF、ドラッグ＝移動。設定は⚙ボタン。訳をタップすると原文が見える。</div>
   <div class="btns">
     <button class="pri" id="save">保存</button>
     <button id="redo">この画面を訳し直す</button>
@@ -7326,7 +7401,7 @@ line-break:strict;overflow-wrap:anywhere;word-break:auto-phrase;white-space:pre-
     fab.setPointerCapture(e.pointerId);
     pd = { x: e.clientX, y: e.clientY, r: S.pos.right, b: S.pos.bottom, moved: false, long: false };
     ui.dockDrag.start();
-    lpTimer = setTimeout(() => { if (pd && !pd.moved) { pd.long = true; openPanel(); } }, 550);
+    lpTimer = setTimeout(() => { if (pd && !pd.moved) pd.long = true; }, 550); // 長押しは何もしない（設定は⚙ボタン）
   });
   fab.addEventListener('pointermove', (e) => {
     if (!pd) return;
