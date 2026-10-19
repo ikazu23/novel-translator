@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.86
+// @version      10.5.96
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -1305,6 +1305,144 @@ Rules:
   // 色の透明度（スクロール演出で薄くなっている文字など）は外して保存する
   const solid = v => String(v).replace(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*(0?\.\d+|1)\)/g, (m, r, g, b, a) => (+a > 0 ? `rgb(${r}, ${g}, ${b})` : m));
 
+  // ---------- 囲み（段落の背景・枠）：イカ墨ノベルで同じ囲みにするため ----------
+  // 段落そのもの、または近くの入れ物に「まわりと違う背景」か「四辺の枠」があれば {s:'bg'|'line'|'round', c:'#rrggbb'}
+  const bxRgba = v => { const m = String(v || '').match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)/); if (!m) return null; let a = m[4] == null ? 1 : m[4].endsWith('%') ? parseFloat(m[4]) / 100 : +m[4]; return [+m[1], +m[2], +m[3], a]; };
+  const bxHex = c => '#' + c.slice(0, 3).map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+  const bxUp = e => e.parentElement || (e.getRootNode && e.getRootNode().host) || null;
+  function bxBehind(el) {
+    for (let p = bxUp(el); p && p.nodeType === 1; p = bxUp(p)) {
+      const c = bxRgba(getComputedStyle(p).backgroundColor);
+      if (c && c[3] > 0.05) return c;
+    }
+    return [255, 255, 255, 1];
+  }
+  function boxOf(e, all) {
+    try {
+      let el = e;
+      for (let i = 0; i < 6 && el && el.nodeType === 1 && el !== document.body && el !== document.documentElement; i++, el = bxUp(el)) {
+        const cs = getComputedStyle(el);
+        const side = d => { const w = parseFloat(cs['border' + d + 'Width']) || 0, c = bxRgba(cs['border' + d + 'Color']); return w >= 1 && cs['border' + d + 'Style'] !== 'none' && cs['border' + d + 'Style'] !== 'hidden' && c && c[3] > 0.2 ? c : null; };
+        const sides = ['Top', 'Right', 'Bottom', 'Left'].map(side);
+        const border = sides.every(Boolean) ? sides[0] : null;
+        const bg = bxRgba(cs.backgroundColor);
+        let fill = null;
+        if (bg && bg[3] > 0.05) {
+          const under = bxBehind(el);
+          fill = bg.slice(0, 3).map((v, k) => v * bg[3] + under[k] * (1 - bg[3]));
+          if (fill.every((v, k) => Math.abs(v - under[k]) < 10)) fill = null; // まわりとほぼ同じ色は囲みではない
+        }
+        // 背景がグラデーション（例：上だけ黒・下は水色）のとき：最後の色を背景、最初の色の帯を上の線とみなす
+        let gradTop = null;
+        if (/^linear-gradient\(/.test(cs.backgroundImage || '') && !/to (left|right|top)|(90|270|0)deg/.test(cs.backgroundImage)) {
+          const stops = [...cs.backgroundImage.matchAll(/(rgba?\([^)]*\))\s*([\d.]+)?(px|%)?/g)].map(m => ({ c: bxRgba(m[1]), pos: m[2] != null ? +m[2] : null, u: m[3] || '' }));
+          if (stops.length >= 2 && stops.every(x => x.c)) {
+            const last = stops[stops.length - 1].c, first = stops[0].c;
+            if (!fill && last[3] > 0.5) { const under = bxBehind(el); fill = last.slice(0, 3); if (fill.every((v, k) => Math.abs(v - under[k]) < 10)) fill = null; }
+            const diff = (a, b) => a.slice(0, 3).some((v, k) => Math.abs(v - b[k]) > 10);
+            const ch = stops.find(x => diff(x.c, first));
+            if (ch && ch.pos != null && first[3] > 0.5 && diff(first, last)) gradTop = { h: ch.u === '%' ? null : ch.pos, pct: ch.u === '%' ? ch.pos : null, c: bxHex(first) };
+          }
+        }
+        if (!fill && !border) continue;
+        // 本文全体の入れ物（たくさんの段落を含むもの）は囲みにしない
+        let n = 0;
+        for (const x of all) if (x && el.contains(x)) n++;
+        const rc = el.getBoundingClientRect();
+        // 画面の段落がぜんぶ入っていても、画面より小さい箱なら囲み（ページめくりで、その画面に囲みしかないとき）
+        if (n > 12 || (n >= 4 && n === all.length && (rc.width >= innerWidth * 0.9 || rc.height >= innerHeight * 0.8))) return null;
+        if (rc.height > innerHeight * 1.6 || (rc.height > innerHeight * 0.8 && rc.width > innerWidth * 0.9)) return null; // 画面いっぱいの入れ物
+        // 囲みの中の文字の色と、囲みの内側の余白（文字の大きさに対する割合。イカ墨ノベルで同じ大きさの箱にするため）
+        const extra = {};
+        try {
+          const ecs = getComputedStyle(e), tc = bxRgba(ecs.color), fs = parseFloat(ecs.fontSize) || 16;
+          if (tc) extra.t = bxHex(tc);
+          const er = e.getBoundingClientRect(), em = v => Math.max(0, Math.min(6, Math.round(v / fs * 10) / 10));
+          if (er.height > 0 && rc.height > 0) { extra.pt = em(er.top - rc.top); extra.pb = em(rc.bottom - er.bottom); extra.px = em(er.left - rc.left); }
+          // 線（上・右・下・左ごとの太さと色）・角の丸さ・箱の幅（イカ墨ノベルで同じ形の箱にするため）
+          const emb = v => Math.max(0, Math.min(3, Math.round(v / fs * 100) / 100));
+          const sw = ['Top', 'Right', 'Bottom', 'Left'].map(d => {
+            const w = parseFloat(cs['border' + d + 'Width']) || 0, st = cs['border' + d + 'Style'], c = bxRgba(cs['border' + d + 'Color']);
+            return w >= 1 && st !== 'none' && st !== 'hidden' && c && c[3] > 0.2 ? [emb(w), bxHex(c)] : null;
+          });
+          // 箱の上下にくっついた、文字のない色の帯（黒い棒など）も線として拾う
+          const barOf = (n, top, inside) => {
+            if (!n || n.nodeType !== 1 || (n.textContent || '').trim()) return null;
+            const c = bxRgba(getComputedStyle(n).backgroundColor);
+            if (!c || c[3] < 0.5 || (fill && c.slice(0, 3).every((v, k) => Math.abs(v - fill[k]) < 10))) return null;
+            const r = n.getBoundingClientRect();
+            if (r.height < 1 || r.height > rc.height * 0.6 || r.width < rc.width * 0.9) return null;
+            const gap = top ? Math.abs((inside ? r.top : r.bottom) - rc.top) : Math.abs((inside ? r.bottom : r.top) - rc.bottom);
+            return gap < 3 ? [r.height, bxHex(c)] : null;
+          };
+          const kids = [...el.children];
+          let tIn = barOf(kids[0], true, true), bIn = barOf(kids[kids.length - 1], false, true);
+          let tOut = tIn ? null : barOf(el.previousElementSibling, true, false), bOut = bIn ? null : barOf(el.nextElementSibling, false, false);
+          // 箱の飾り（::before / ::after）が色の帯になっているとき
+          const isBar = c => c && c[3] > 0.5 && !(fill && c.slice(0, 3).every((v, k) => Math.abs(v - fill[k]) < 10));
+          for (const ps of ['::before', '::after']) {
+            const pc = getComputedStyle(el, ps);
+            if (!pc || !pc.content || pc.content === 'none' || pc.display === 'none') continue;
+            const c = bxRgba(pc.backgroundColor), h = parseFloat(pc.height) || 0;
+            if (!isBar(c) || h < 1 || h > rc.height * 0.6) continue;
+            const atBottom = ps === '::after' ? pc.top === 'auto' || pc.position === 'static' : (pc.top === 'auto' && pc.bottom !== 'auto');
+            if (atBottom) { if (!bIn) bIn = [h, bxHex(c)]; } else if (!tIn) tIn = [h, bxHex(c)];
+          }
+          // 外側の入れ物（同じ幅）が色付きで、箱の上や下にはみ出して見えているとき（中の箱を少しずらして入れてある作り）
+          for (let an = bxUp(el), k = 0; an && an.nodeType === 1 && k < 2; an = bxUp(an), k++) {
+            const ar = an.getBoundingClientRect();
+            if (Math.abs(ar.left - rc.left) > 4 || Math.abs(ar.right - rc.right) > 4) break;
+            if ((an.textContent || '').trim() !== (el.textContent || '').trim()) break;
+            const acs = getComputedStyle(an), ac = bxRgba(acs.backgroundColor);
+            const abt = parseFloat(acs.borderTopWidth) || 0, abb = parseFloat(acs.borderBottomWidth) || 0;
+            const abtc = bxRgba(acs.borderTopColor), abbc = bxRgba(acs.borderBottomColor);
+            const gt = rc.top - ar.top, gb = ar.bottom - rc.bottom;
+            if (!tIn && !tOut) {
+              if (gt >= 1 && gt <= rc.height * 0.6 && isBar(ac)) tOut = [gt, bxHex(ac)];
+              else if (abt >= 1 && acs.borderTopStyle !== 'none' && isBar(abtc)) tOut = [abt + Math.max(0, gt - abt), bxHex(abtc)];
+            }
+            if (!bIn && !bOut) {
+              if (gb >= 1 && gb <= rc.height * 0.6 && isBar(ac)) bOut = [gb, bxHex(ac)];
+              else if (abb >= 1 && acs.borderBottomStyle !== 'none' && isBar(abbc)) bOut = [abb + Math.max(0, gb - abb), bxHex(abbc)];
+            }
+          }
+          // グラデーションの上の帯
+          if (!tIn && !tOut && gradTop) { const h = gradTop.h != null ? gradTop.h : rc.height * gradTop.pct / 100; if (h >= 1 && h <= rc.height * 0.6) tIn = [h, gradTop.c]; }
+          if (tIn || tOut) sw[0] = [emb((tIn || tOut)[0]), (tIn || tOut)[1]];
+          if (bIn || bOut) sw[2] = [emb((bIn || bOut)[0]), (bIn || bOut)[1]];
+          if (tOut && extra.pt != null) extra.pt = Math.min(6, Math.round((extra.pt + tOut[0] / fs) * 10) / 10);
+          if (bOut && extra.pb != null) extra.pb = Math.min(6, Math.round((extra.pb + bOut[0] / fs) * 10) / 10);
+          if (sw.some(Boolean)) extra.b = sw;
+          extra.r = emb(parseFloat(cs.borderTopLeftRadius) || 0);
+          // 箱の幅：囲みの外の、ふつうの段落の幅（＝本文の幅）に対する割合。画面に囲みしかないときは入れ物の幅で
+          let col = 0;
+          for (const x of all) if (x && x.nodeType === 1 && !el.contains(x)) { const xw = x.getBoundingClientRect().width; if (xw > col) col = xw; }
+          if (!col) for (let up = bxUp(el), k = 0; up && up.nodeType === 1 && k < 5; up = bxUp(up), k++) {
+            const ucs = getComputedStyle(up), pw = up.clientWidth - (parseFloat(ucs.paddingLeft) || 0) - (parseFloat(ucs.paddingRight) || 0);
+            if (pw > rc.width * 1.05) { col = pw; break; }
+          }
+          if (col > rc.width * 1.03) { const w = Math.round(rc.width / col * 20) / 20; if (w < 0.97) extra.w = Math.max(0.3, w); }
+        } catch { /* 取れなければ色・余白なし */ }
+        if (fill) return Object.assign({ s: 'bg', c: bxHex(fill) }, extra);
+        return Object.assign({ s: (parseFloat(cs.borderTopLeftRadius) || 0) >= 8 ? 'round' : 'line', c: bxHex(border) }, extra);
+      }
+    } catch { /* 取れなければ囲みなし */ }
+    return null;
+  }
+  const bxKey = b => b ? b.s + '|' + b.c : '';
+  // 同じ囲みの段落にはさまれた空行も、同じ囲みに入れる（箱が途中で切れないように）
+  function boxFillBlanks(paras) {
+    let last = null, run = [];
+    for (const p of paras) {
+      if (p.blank) { run.push(p); continue; }
+      if (last && p.box && bxKey(last) === bxKey(p.box)) run.forEach(b => { b.box = p.box; });
+      run = [];
+      last = p.box || null;
+    }
+    return paras;
+  }
+  const boxCss = b => !b ? '' : b.s === 'bg' ? `background:${b.c};padding:.4em 1em` : `border:2px solid ${b.c};padding:.4em 1em${b.s === 'round' ? ';border-radius:14px' : ''}`;
+
   function inlineClone(src) {
     const clone = src.cloneNode(true);
     const a = [src, ...src.querySelectorAll('*')], b = [clone, ...clone.querySelectorAll('*')];
@@ -1461,7 +1599,8 @@ ${bodyHtml}
     ui.toast(v ? (EXPORT_OK ? 'この話を「挿絵あり」にしました（保存・コピー・イカ墨ノベルに送る話の最初に入ります）' : 'この話を「挿絵あり」にしました（イカ墨ノベルに送る話の最初に入ります）') : '「挿絵あり」を解除しました', 3000);
   }
   function buildCopy(ctx) {
-    return (ilMarked() ? IL_NOTE + '\n\n' : '') + layoutLines(ctx).map((x, k) => (k ? '\n' + '\n'.repeat(x.blanks) : '') + x.text).join('');
+    const lines = layoutLines(ctx);
+    return (ilMarked() ? IL_NOTE + '\n\n' : '') + lines.map((x, k) => (k ? '\n' + '\n'.repeat(x.blanks) : '') + x.text).join('');
   }
 
   // ---------- 小説リーダー用のデータ（保存したHTMLに埋め込む） ----------
@@ -1508,6 +1647,7 @@ ${bodyHtml}
     const baseColor = mode(styles.map(c => solid(c.color)));
     const baseSize = parseFloat(mode(styles.map(c => c.fontSize))) || 16;
     const baseWeight = mode(styles.map(c => c.fontWeight)), baseStyle = mode(styles.map(c => c.fontStyle));
+    const lineEls = lines.map(x => x.el);
     const paras = [];
     lines.forEach((x, k) => {
       for (let b = 0; b < x.blanks; b++) paras.push({ blank: true });
@@ -1525,8 +1665,11 @@ ${bodyHtml}
       if (solid(cs.color) !== baseColor) para.color = solid(cs.color);
       const ratio = (parseFloat(cs.fontSize) || baseSize) / baseSize;
       if (Math.abs(ratio - 1) > 0.05) para.sizeRatio = Math.round(ratio * 100) / 100;
+      const bx = boxOf(x.el, lineEls);
+      if (bx) para.box = bx;
       paras.push(para);
     });
+    boxFillBlanks(paras);
     if (ilMarked()) paras.unshift(ilNotePara(), { blank: true });
     return { v: 1, title: pageTitle().replace(/\s+/g, ' ').trim(), source: location.href, baseSize, paras };
   }
@@ -1964,7 +2107,8 @@ ${bodyHtml}
       if (k >= 0) {
         // 今回の最初の行は、その前の行が画面になかったので空行の数は前の記録を使う
         if (j === 0 && lay && resL[k]) lay = Object.assign({}, lay, { blanks: resL[k].blanks });
-        if (lay) resL[k] = lay;
+        // 新しい記録で上書きする（前のバージョンで重複して記録された古い場面が、あとから新しい見た目（囲みなど）を消さないように）
+        if (lay && !(resL[k] && (resL[k].at || 0) > (lay.at || 0))) resL[k] = lay;
         pos = k;
       } else {
         resS.splice(pos + 1, 0, newS[j]);
@@ -2041,6 +2185,8 @@ ${bodyHtml}
         col: solid(cs.color), td: cs.textDecorationLine, tdc: solid(cs.textDecorationColor), tds: cs.textDecorationStyle,
         al: cs.textAlign === 'start' || cs.textAlign === 'justify' ? 'left' : cs.textAlign === 'end' ? 'right' : cs.textAlign,
         ti: cs.textIndent,
+        at: Date.now(), // いつ記録したか（新しい記録を優先するため）
+        ...((b => b ? { bx: b } : {})(boxOf(e, els))),
       };
     });
   }
@@ -2507,6 +2653,7 @@ ${bodyHtml}
     if (textApplied.size) ui.fabLabel('原');
     liveSave();
     setLast(liveText());
+    snapLater(); // 保存済みの訳を出しただけでも、見た目（囲み・色など）を記録し直したので控えも作り直す（イカ墨ノベルに送り直せるように）
     if (didWork) {
       saveTail(liveText());
       // 作品メモ（人物・用語）も、新しく40文ほど訳すごとに裏で更新する
@@ -2521,7 +2668,7 @@ ${bodyHtml}
     const left = items.filter(({ src }) => hasKo(src)).length;
     if (liveErr) ui.toast('エラー: ' + liveErr.message + (left ? `（${left}文は未訳）` : ''), 6000);
     else if (left) ui.toast(`完了（${left}文は${L().name}のまま。メニューの「この話を翻訳し直す」で再挑戦できます）`, 6000);
-    else ui.toast(didWork ? `翻訳完了（この場面 ${items.length}文・これまで ${liveEntries().length}文）` : `保存済みの${provName()}版の訳を表示中`, 3000);
+    else ui.toast(didWork ? `翻訳完了（この場面 ${items.length}文・これまで ${liveEntries().length}文）${!OUT_X && location.host !== 'ikazu23.github.io' ? '・次にイカ墨ノベルを開くと送ります' : ''}` : `保存済みの${provName()}版の訳を表示中`, didWork ? 4000 : 3000);
   }
 
 
@@ -2577,7 +2724,7 @@ ${bodyHtml}
       }
       const inner = meta.html || escHtml(stripTags(liveData.map[k]));
       // HTML：ページで見えていた段落の見た目をそのまま
-      body += `<p style="margin:0 0 .6em;${lay ? layStyle(lay) : (meta.align ? 'text-align:' + meta.align : '')}">${inner}</p>\n`;
+      body += `<p style="margin:0 0 .6em;${lay ? layStyle(lay) : (meta.align ? 'text-align:' + meta.align : '')}${lay && lay.bx ? ';' + boxCss(lay.bx) : ''}">${inner}</p>\n`;
       // リーダー用：段落全体の太字・斜体・線は span で包み、色・大きさ・配置は段落の設定に
       let html = inner;
       const para = { text: stripTags(liveData.map[k]) };
@@ -2592,12 +2739,14 @@ ${bodyHtml}
         if (lay.col !== base.col) para.color = lay.col;
         const r = (parseFloat(lay.fs) || baseSize) / baseSize;
         if (Math.abs(r - 1) > 0.05) para.sizeRatio = Math.round(r * 100) / 100;
+        if (lay.bx) para.box = lay.bx;
       } else if (meta.align) para.align = meta.align;
       para.html = html;
       paras.push(para);
       lastG = scene;
       addIllust(k);
     }
+    boxFillBlanks(paras);
     const title = pageTitle().replace(/\s+/g, ' ').trim() || 'translation';
     const data = { v: 1, title, source: location.href, baseSize, paras };
     const html = `<!doctype html>
@@ -2620,12 +2769,17 @@ ${body}</main></body></html>`;
   function snapshotEp() {
     try {
       let data = null;
-      if (liveData && liveData.key === liveKey()) data = liveBuild()?.data || null;
+      const live = !!(liveData && liveData.key === liveKey());
+      if (live) data = liveBuild()?.data || null;
       else if (copyCtx && copyCtx.href === pageId() && inPlaceOn) data = episodeData(copyCtx);
       if (!data || !data.paras || !data.paras.length) return;
       const k = epKey(), old = GM_getValue(k, null);
-      const n = data.paras.filter(x => !x.blank && !x.ilNote).length; // 「挿絵あり」の印は数えない（付け外ししても控えを入れ替えられるように）
-      if (old && old.n > n) return; // 途中までしか表示されていないときは、前の多い方を残す
+      // 本文の文だけを数える（空行・「挿絵あり」の印・場面の区切り「◇　◇　◇」は数えない）
+      const count = d => ((d && d.paras) || []).filter(x => x && !x.blank && !x.ilNote && x.text !== SCENE_MARK && !/^【挿絵あり[^】]*】$/.test(String(x.text || ''))).length;
+      const n = count(data), oldN = old ? count(old.data) : 0;
+      // 途中までしか表示されていないときは、前の多い方を残す。
+      // カカオ（読んだ文を全部記録してある）は、場面のまとまり方で数文減ることがあるので、大きく減ったときだけ残す
+      if (old && (live ? n < oldN - Math.max(3, Math.round(oldN * 0.1)) : n < oldN)) return;
       GM_setValue(k, { work: workName(), wk: workKey(), title: data.title, num: epNum(data.title), prov: prov(), at: Date.now(), n, data });
     } catch { /* 控えられなくても翻訳は続ける */ }
   }
@@ -2638,6 +2792,7 @@ ${body}</main></body></html>`;
       if (p.align) st.push('text-align:' + p.align);
       if (p.color) st.push('color:' + p.color);
       if (p.sizeRatio) st.push('font-size:' + p.sizeRatio + 'em');
+      if (p.box) st.push(boxCss(p.box));
       body += `<p style="margin:0 0 .6em;${st.join(';')}">${p.html || escHtml(p.text || '')}</p>\n`;
     }
     return `<!doctype html>
@@ -2760,6 +2915,7 @@ ${body}</main></body></html>`;
       applyTr(els, cached);
       copyCtx = { roots, els, tr: cached, srcs, href: pageId() };
       setLast(cached.map((t, i) => toPlain(els[i], t ?? srcs[i])).join('\n\n'));
+      snapLater(); // 保存済みの訳を出したときも控えを作り直す
       const c0 = cfg();
       const bad = cached.filter(needsFix).length;
       // 自動修正は1話につき1回だけ（わざと韓国語の演出などで毎回料金がかかるのを防ぐ）
@@ -3766,6 +3922,38 @@ ${body}</main></body></html>`;
     } catch (e) { L.push('記録確認エラー: ' + e.message); }
     alert(L.join('\n'));
   });
+  // 囲みの作りを調べる（イカ墨ノベルで囲みの形が違うとき用）。結果はコピーされる
+  GM_registerMenuCommand('この画面の囲みを調べる（イカ墨ノベル用）', () => {
+    try {
+      let els = [];
+      try { els = sceneBlocks(); } catch { /* なし */ }
+      if (!els.length) els = deepRoots().flatMap(r => collectParas(r));
+      els = els.filter(e => { const r = e.getBoundingClientRect(); return r.height > 0 && r.bottom > 0 && r.top < innerHeight; });
+      const desc = n => {
+        const c = getComputedStyle(n), r = n.getBoundingClientRect();
+        const bd = ['Top', 'Right', 'Bottom', 'Left'].map(d => (parseFloat(c['border' + d + 'Width']) || 0) ? `${d[0]}${parseFloat(c['border' + d + 'Width'])}px ${c['border' + d + 'Style']} ${c['border' + d + 'Color']}` : '').filter(Boolean).join(', ');
+        const pse = ['::before', '::after'].map(ps => { const p = getComputedStyle(n, ps); return p && p.content && p.content !== 'none' ? `${ps}{bg:${p.backgroundColor};h:${p.height};pos:${p.position};top:${p.top};bottom:${p.bottom}}` : ''; }).filter(Boolean).join(' ');
+        return `<${n.tagName.toLowerCase()}${n.className && typeof n.className === 'string' ? '.' + n.className.trim().split(/\s+/).slice(0, 2).join('.') : ''}> ${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} bg:${c.backgroundColor}${c.backgroundImage !== 'none' ? ' img:' + c.backgroundImage.slice(0, 120) : ''}${bd ? ' border:' + bd : ''}${parseFloat(c.borderTopLeftRadius) ? ' r:' + c.borderTopLeftRadius : ''}${c.boxShadow !== 'none' ? ' shadow:' + c.boxShadow.slice(0, 60) : ''}${pse ? ' ' + pse : ''} pad:${c.padding}`;
+      };
+      const L = ['画面 ' + innerWidth + 'x' + innerHeight + ' / ' + location.host];
+      let shown = 0;
+      for (const e of els) {
+        const bx = boxOf(e, els);
+        const deco = (() => { for (let n = e, k = 0; n && n.nodeType === 1 && n !== document.body && k < 6; n = bxUp(n), k++) { const c = getComputedStyle(n), bg = bxRgba(c.backgroundColor); if (c.backgroundImage !== 'none' || parseFloat(c.borderTopWidth) || parseFloat(c.borderBottomWidth)) return true; if (bg && bg[3] > 0.05) { const u = bxBehind(n); if (bg.slice(0, 3).some((v, i) => Math.abs(v - u[i]) > 10)) return true; } } return false; })();
+        if (!bx && !deco) continue;
+        if (++shown > 4) break;
+        L.push('', '■「' + (e.textContent || '').trim().slice(0, 16) + '」→ ' + JSON.stringify(bx));
+        for (let n = e, k = 0; n && n.nodeType === 1 && n !== document.body && k < 6; n = bxUp(n), k++) {
+          L.push('  '.repeat(k + 1) + desc(n));
+          if (k < 3) [n.previousElementSibling, n.nextElementSibling].forEach((sb, j) => { if (sb && !(sb.textContent || '').trim()) L.push('  '.repeat(k + 1) + (j ? '└次: ' : '└前: ') + desc(sb)); });
+        }
+      }
+      if (!shown) L.push('この画面に囲みらしいものが見つかりませんでした');
+      const text = L.join('\n');
+      try { GM_setClipboard(text); } catch { /* コピーできない */ }
+      alert(text.slice(0, 1500) + (text.length > 1500 ? '\n…' : '') + '\n\n（全部コピーしました。チャットに貼ってください）');
+    } catch (err) { alert('調べられませんでした: ' + err.message); }
+  });
   GM_registerMenuCommand('本文エリア設定をリセット', () => { GM_deleteValue('sel:' + location.host); alert('リセットしました'); });
   GM_registerMenuCommand('この話の並びを記録し直す（話が書き直されたとき・訳は残す）', () => {
     const ld = GM_getValue(liveKey(), null);
@@ -3802,14 +3990,22 @@ ${body}</main></body></html>`;
   // ---------- イカ墨ノベルへ訳した話を渡す ----------
   // イカ墨ノベル（ikazu23.github.io）を開くと、この端末で訳した話のうち、まだ渡していない話（または前より先まで訳した話）を渡す。
   // 受け取ったという返事が来た話だけ「渡した」と覚える。ほかのサイトでは何もしない
+  const hashStr = t => { let h = 5381; for (let i = 0; i < t.length; i++) h = ((h * 33) ^ t.charCodeAt(i)) >>> 0; return h.toString(36) + ':' + t.length; };
   function novelHandoff() {
     if (OUT_X || window.top !== window.self || location.host !== 'ikazu23.github.io') return;
     const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const post = o => { try { W.postMessage('kztlNovel:' + JSON.stringify(o), location.origin); } catch (e) { /* 渡せない */ } };
-    let lastSend = 0;
-    const sendAll = () => {
+    // 訳の中身だけの指紋（空行の数・囲みの余白のような、画面の位置で少し変わるものは入れない）
+    const sigOf = data => hashStr(JSON.stringify(((data && data.paras) || []).filter(x => x && !x.blank && !x.ilNote)
+      .map(x => [x.html != null ? x.html : (x.text || ''), x.align || '', x.color || '', x.sizeRatio || '', x.box ? x.box.s + '|' + x.box.c + (x.box.b || x.box.r || x.box.w ? '|' + JSON.stringify([x.box.b || null, x.box.r || 0, x.box.w || 0]) : '') : ''])));
+    let lastSend = 0, gotHello = false;
+    // info：新しいイカ墨ノベルが教えてくれる「持っている話」{ have: {話のキー: [指紋, 残すにした版の指紋]}, skipWk: [入れない作品] }
+    // これがあれば、ノベルに無い話（消した話も）と、ノベルのが古い話だけ送る。なければ前と同じく「まだ送っていない話」を送る
+    const sendAll = (info) => {
       if (Date.now() - lastSend < 3000) return; // 合図が続けて来ても1回だけ
       lastSend = Date.now();
+      const have = info && info.have && typeof info.have === 'object' ? info.have : null;
+      const skipWk = new Set(info && Array.isArray(info.skipWk) ? info.skipWk : []);
       const sent = GM_getValue('novelSent', {});
       const best = new Map(); // 話ごとに1つ（エンジン別に複数あれば新しい方）
       for (const k of GM_listValues()) {
@@ -3824,26 +4020,41 @@ ${body}</main></body></html>`;
       const eps = [];
       for (const v of best.values()) {
         const s0 = sent[v.page];
-        if (s0 && (s0.n || 0) >= (v.n || 0)) continue;
-        eps.push({ key: v.page, wk: v.wk, work: v.work, title: v.title, num: v.num, n: v.n || 0, at: v.at, data: v.data });
+        const h = hashStr(JSON.stringify(v.data)); // 中身・見た目（囲みなど）が変わったら送り直す
+        const sig = sigOf(v.data);
+        const sentBefore = () => s0 && (s0.h ? s0.h === h : (s0.n || 0) >= (v.n || 0) && s0.hv);
+        if (have && !skipWk.has(v.wk)) {
+          const a = have[v.page];
+          if (Array.isArray(a) && a[0]) { if (a[0] === sig || a[1] === sig) continue; } // ノベルに同じ版がある・前に「残す」にした版
+          else if (a && sentBefore()) continue; // 指紋ができる前に入れた話：前と同じ決め方
+          // ノベルに無い話（消した話・まだ入れていない話）は送る
+        } else if (sentBefore()) continue;
+        eps.push({ key: v.page, wk: v.wk, work: v.work, title: v.title, num: v.num, n: v.n || 0, h, sig, at: v.at, data: v.data });
       }
-      if (eps.length) post({ type: 'send', eps });
+      if (eps.length) { post({ type: 'send', eps }); try { ui.toast(`イカ墨翻訳：${eps.length}話を送りました`, 3000); } catch (e) { /* 表示できない */ } }
       else if (!best.size && !sendAll.told) { sendAll.told = true; try { ui.toast('イカ墨翻訳：この端末で訳した話の控えがまだありません（訳した話を開いて「訳」を押すと控えられます）', 5000); } catch (e) { /* 表示できない */ } }
     };
     window.addEventListener('message', e => {
       if (e.origin !== location.origin || typeof e.data !== 'string' || !e.data.startsWith('kztlNovel:')) return;
       let d; try { d = JSON.parse(e.data.slice(10)); } catch (_) { return; }
       if (!d) return;
-      if (d.type === 'hello') sendAll();
+      if (d.type === 'hello') { gotHello = true; sendAll(d.v === 2 ? d : null); }
       if (d.type === 'ack' && Array.isArray(d.items)) {
         const sent = GM_getValue('novelSent', {});
-        d.items.forEach(a => { if (a && a.key) sent[a.key] = { n: a.n || 0, at: Date.now() }; });
+        d.items.forEach(a => { if (a && a.key) sent[a.key] = { n: a.n || 0, h: a.h || '', sig: a.sig || '', hv: 1, at: Date.now() }; });
         GM_setValue('novelSent', sent);
       }
     });
-    setTimeout(sendAll, 1500);
+    // ノベルに「持っている話」を聞く。古いノベルで返事がなければ、前と同じやり方で送る
+    setTimeout(() => { if (!gotHello) post({ type: 'ping' }); }, 600);
+    setTimeout(() => { if (!gotHello) sendAll(null); }, 2500);
+    // ほかのタブで訳したあと、ノベルのタブに戻ってきたら、すぐ新しい版を送る（開き直さなくてよいように）
+    const onBack = () => { if (document.visibilityState === 'visible') post({ type: 'ping' }); };
+    document.addEventListener('visibilitychange', onBack);
+    window.addEventListener('focus', onBack);
   }
   try { novelHandoff(); } catch (e) { /* イカ墨ノベルに渡せなくても続ける */ }
+
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
