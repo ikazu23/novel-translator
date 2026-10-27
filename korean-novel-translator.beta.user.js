@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.97
+// @version      10.5.98
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -1010,6 +1010,15 @@ Rules:
       }
       if (j.err) throw new Error((j.err.code || 500) + ': ' + (j.err.message || 'error'));
       if (j.block) throw new Error('BLOCKED: ' + j.block);
+      // 途中で安全フィルターに止められたとき：もう一度だけ試す（通ることがある）。だめなら、そこまでの訳を付けて「止められた」として返す
+      const cut = x => !!x.finish && !/^(STOP|MAX_TOKENS|FINISH_REASON_UNSPECIFIED)$/.test(x.finish);
+      if (j.text.trim() && cut(j)) {
+        let j2 = null;
+        try { j2 = await call(); } catch { /* 1回目の結果を使う */ }
+        if (j2 && !j2.err && !j2.block && !cut(j2) && j2.text.trim()) return j2.text;
+        const best = j2 && !j2.err && j2.text.length > j.text.length ? j2 : j;
+        const e = new Error('BLOCKED: ' + j.finish); e.partial = best.text; throw e;
+      }
       if (!j.text.trim() && j.finish && j.finish !== 'STOP') throw new Error('BLOCKED: ' + j.finish);
       return j.text;
     }
@@ -1715,7 +1724,11 @@ ${bodyHtml}
           (...a) => ui.status(waitMsg(...a)))).trim();
       } catch (e) {
         if (!/^BLOCKED/.test(e.message)) throw e;
-        out[k] = chunks[k].map(i => paras[i]).join('\n\n'); blocked += chunks[k].length;
+        const orig = chunks[k].map(i => paras[i]).join('\n\n');
+        // 途中で止められたときは、そこまでの訳のあとに原文を付ける（訳が途中で消えて気づかないのを防ぐ）
+        const partial = e.partial ? cleanBlock(e.partial).trim() : '';
+        out[k] = partial ? partial + '\n\n' + trUI('（ここから先はGoogleの安全フィルターで止められました。以下は原文）') + '\n\n' + orig : orig;
+        blocked += chunks[k].length;
       }
       finished++;
       const prefix = [];
@@ -1776,6 +1789,8 @@ ${bodyHtml}
     for (const x of text.matchAll(/\[\[(\d+)\]\]\s*([\s\S]*?)(?=\s*\[\[\d+\]\]|\s*$)/g)) m.set(+x[1], x[2].trim());
     return m;
   }
+  // 途中で止められた訳の、止められた段落の番号（最後の番号）
+  const cutNum = t => { const m = parseNum(t || ''); return m.size ? Math.max(...m.keys()) : 1; };
 
   // ---------- 装飾（太字・斜体・取り消し線・色など）の保持 ----------
   const TAG_RE = /<\/?t\d+\/?>/g;
@@ -2035,7 +2050,14 @@ ${bodyHtml}
             if (t && (tr[i] == null || leftIn(t) < leftIn(tr[i]))) tr[i] = t;
           }
         } catch (e) {
-          if (/^BLOCKED/.test(e.message)) ids.forEach(i => skip.add(i));
+          if (/^BLOCKED/.test(e.message) && e.partial) {
+            // 途中で止められた：訳せた段落は使い、止められた段落だけ諦める（後ろの段落は次の回でもう一度）
+            const pm = parseNum(e.partial), cn = cutNum(e.partial);
+            for (const i of ids) {
+              if (i + 1 < cn && pm.has(i + 1)) { const t = clean(pm.get(i + 1), srcs[i]); if (t && (tr[i] == null || leftIn(t) < leftIn(tr[i]))) tr[i] = t; }
+              else if (i + 1 === cn) skip.add(i);
+            }
+          } else if (/^BLOCKED/.test(e.message)) ids.forEach(i => skip.add(i));
           else err = e;
         }
         applyTr(els, tr);
@@ -2409,6 +2431,7 @@ ${bodyHtml}
 
 
   let liveErr = null;
+  const liveSolo = new Set(); // 途中で止められた段落：次は1つだけで送る
   async function liveTranslate(note, limit) {
     const c = cfg();
     if (!c.key) { ui.open(); ui.status('APIキーを設定してください'); ui.settings(true, 'novel'); return false; }
@@ -2417,6 +2440,7 @@ ${bodyHtml}
     const batch = [];
     let len = 0;
     for (const e of liveQueue.entries()) {
+      if (liveSolo.has(e[0])) { if (batch.length) continue; batch.push(e); break; }
       if (batch.length && len + e[0].length > (limit || +c.chunk || 4000)) break;
       batch.push(e); len += e[0].length + 8;
     }
@@ -2450,7 +2474,22 @@ ${bodyHtml}
       liveSave();
       setLast(liveText());
     } catch (e) {
-      if (/^BLOCKED/.test(e.message)) srcs.forEach(src => { liveData.map[src] = src; });
+      if (/^BLOCKED/.test(e.message) && e.partial && srcs.length > 1) {
+        // 途中で止められた：最後まで訳せた段落は使い、止められた段落は次に1つだけで、その後ろはもう一度まとめて
+        const pm = parseNum(e.partial), cn = cutNum(e.partial);
+        srcs.forEach((src, i) => {
+          if (liveData.map[src] != null) return;
+          if (i + 1 < cn && pm.has(i + 1)) liveData.map[src] = clean(pm.get(i + 1), src);
+          else { if (i + 1 === cn) liveSolo.add(src); liveQueue.set(src, batch[i][1]); }
+        });
+        batch.forEach(([src, el]) => { if (liveData.map[src] != null && el.textContent !== textApplied.get(el)) applyText(el, liveData.map[src], src); });
+        batch.forEach(([src, el]) => applyLive(el, src));
+        liveSave();
+        setLast(liveText());
+      } else if (/^BLOCKED/.test(e.message)) {
+        srcs.forEach(src => { liveSolo.delete(src); liveData.map[src] = src; });
+        ui.toast('Googleの安全フィルターで止められた段落は、原文のままです', 4000);
+      }
       else { liveErr = e; ui.toast('エラー: ' + e.message, 4000); liveQueue.clear(); }
     } finally {
       liveBusy = false;
@@ -2990,7 +3029,9 @@ ${body}</main></body></html>`;
           (...a) => ui.toast(waitMsg(...a)));
       } catch (e) {
         res = '';
-        if (/^BLOCKED/.test(e.message)) { blocked += chunks[k].length; chunks[k].forEach(i => blockedSet.add(i)); }
+        // 途中で止められたときは、最後まで訳せた段落だけ使う（残りはあとで小さく分けて訳し直す）
+        if (/^BLOCKED/.test(e.message) && e.partial) { const cn = cutNum(e.partial); res = [...parseNum(e.partial)].filter(([n]) => n < cn).map(([n, t]) => `[[${n}]] ${t}`).join('\n\n'); }
+        else if (/^BLOCKED/.test(e.message)) { blocked += chunks[k].length; chunks[k].forEach(i => blockedSet.add(i)); }
         else lastErr = e; // 1つの塊が失敗しても止めず、あとで訳し直す
       }
       const m = parseNum(res);
@@ -3015,7 +3056,7 @@ ${body}</main></body></html>`;
       saveTail(tr.filter(t => t != null).join('\n'));
       updateSheet(c, src, tr.filter(t => t != null).map(stripTags).join('\n\n'));
       const msgs = [];
-      if (blocked) msgs.push(`${blocked}段落はブロックされ原文のまま`);
+      if (blockedSet.size) msgs.push(`${blockedSet.size}段落はブロックされ原文のまま`);
       if (left) msgs.push(`${left}段落は${L().name}のまま。「再翻訳」を試してください`);
       if (left && lastErr) msgs.push('エラー: ' + lastErr.message);
       ui.toast(msgs.length ? `完了（${msgs.join('／')}）` : `完了（${els.length}段落）`, msgs.length ? 6000 : 3000);
