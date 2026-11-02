@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.98
+// @version      10.5.100
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -474,7 +474,13 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   // お知らせ・確認・メニューの文字も英語にする（日本語のときはそのまま）
   const alert = (m) => KZ_ALERT(trUI(m));
   const confirm = (m) => KZ_CONFIRM(trUI(m));
-  const GM_registerMenuCommand = (name, fn) => KZ_MENU(trUI(name), fn);
+  // Safari版Tampermonkeyなどで、同じメニューが続けて何度も呼ばれることがあるので、前の実行が終わってから2秒以内の呼び出しは無視する
+  const menuLast = {};
+  const GM_registerMenuCommand = (name, fn) => KZ_MENU(trUI(name), (...a) => {
+    if (Date.now() - (menuLast[name] || 0) < 2000) return;
+    menuLast[name] = Date.now();
+    try { return fn(...a); } finally { menuLast[name] = Date.now(); }
+  });
   // 訳の記録が変わったら、クラウドへの自動バックアップの印を付ける
   let backupDirty = false, backupTimer = 0;
   const GM_setValue = (k, v) => {
@@ -1577,6 +1583,8 @@ ${bodyHtml}
       const hs = rects.map(r => r.height).filter(h => h > 0);
       const cs = getComputedStyle(lines[0].el);
       const lh = (hs.length ? Math.min(...hs) : 0) || parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 16) * 1.6;
+      // 空行がとても多い話（4分の3以上の間に空行）では、上の値が空行の空きになってしまうので、いちばん小さい空きを使う
+      if (g0 - valid[0] >= lh * 0.6) g0 = valid[0];
       pitch = Math.max(8, lh + Math.max(0, g0));
     }
 
@@ -1588,7 +1596,8 @@ ${bodyHtml}
       let blanks = 0;
       if (li > 0) {
         blanks = emptyRun;
-        if (useRects && gaps[li - 1] != null) blanks = Math.max(0, Math.round((gaps[li - 1] - g0) / pitch));
+        // 空の段落（空行）があれば、その数より少なくしない
+        if (useRects && gaps[li - 1] != null) blanks = Math.max(emptyRun, Math.round((gaps[li - 1] - g0) / pitch));
       }
       res.push({ el: x.el, text: x.text, blanks: Math.min(blanks, 10), illust: x.illust });
       li++; emptyRun = 0;
@@ -3861,7 +3870,8 @@ ${body}</main></body></html>`;
     if (inPlaceOn && !liveOn && !(keep && keep.id === pageId()) && ![...applied.keys()].some(e => e.isConnected)) { applied.clear(); inPlaceOn = false; ui.fabLabel('訳'); }
     // Ridi・カカオページ以外の kakao.com では、iframeの中（ビューア）か、手動で有効にしたときだけ出す
     const reader = /ridibooks|page\.kakao/.test(location.host);
-    const forced = GM_getValue('force:' + location.host, false);
+    const hiddenSite = GM_getValue('hide:' + location.host, false);
+    const forced = !hiddenSite && GM_getValue('force:' + location.host, false); // 「出さない」がオンなら「常に表示」より優先
     const active = inPlaceOn || textApplied.size > 0 || !!(liveData && liveData.key === liveKey() && liveEntries().length) || forced;
     let many;
     if (mark().kztlEp) many = koNodes(markedBody()) > 0; // イカ墨ノベルなど：短い文でもボタンを出す
@@ -3873,7 +3883,7 @@ ${body}</main></body></html>`;
       if (!scanHit && (scanLeft > 0 || ++scanTick % 4 === 0)) { scanLeft = Math.max(0, scanLeft - 1); scanHit = koDeep() > 300; } // あとから本文が出るページも、ゆっくり見続ける
       many = scanHit;
     }
-    if (GM_getValue('hide:' + location.host, false) && !active) many = false; // このサイトでは出さない設定
+    if (hiddenSite && !active) many = false; // このサイトでは出さない設定
     // 小説のページでは、挿絵の保存した訳を出せるようにWTの仕組みを裏で動かしておく（ボタンは小説のまま）
     if (!wtStarted && (active || (reader && many)) && illustOn() && window.top === window.self) { startWT(false); if (wtApi) { wtApi.show(false); if (novelOn) wtApi.illust(true); } }
     // WTモードのサイトでは、小説の「訳」の代わりにWTボタンを出す
@@ -3900,16 +3910,21 @@ ${body}</main></body></html>`;
     translateInPlace(true);
   });
   GM_registerMenuCommand('本文エリアを手動で選ぶ', pick);
-  GM_registerMenuCommand('このサイトでボタンを常に表示（切り替え）', () => {
+  // サイトごとの切り替えは、ページ本体と同じサイトの枠（iframe）では出さない（1回押しただけで枠の数だけ切り替わらないように）
+  const sameSiteFrame = (() => { if (window.top === window.self) return false; try { return window.top.location.host === location.host; } catch { return false; } })();
+  // お知らせは alert ではなく画面下の表示で（alert で止まっている間に同じメニューがもう一度呼ばれることがあるため）
+  if (!sameSiteFrame) GM_registerMenuCommand('このサイトでボタンを常に表示（切り替え）', () => {
     const k = 'force:' + location.host, v = !GM_getValue(k, false);
     GM_setValue(k, v);
-    alert(v ? 'このサイトでは常にボタンを表示します' : '自動に戻しました');
+    if (v) GM_setValue('hide:' + location.host, false); // 「出さない」とは同時にオンにしない
+    ui.toast(v ? 'このサイトでは常にボタンを表示します' : '自動に戻しました', 4000);
     check();
   });
-  GM_registerMenuCommand('このサイトではボタンを出さない（切り替え）', () => {
+  if (!sameSiteFrame) GM_registerMenuCommand('このサイトではボタンを出さない（切り替え）', () => {
     const k = 'hide:' + location.host, v = !GM_getValue(k, false);
     GM_setValue(k, v);
-    alert(v ? 'このサイトではボタンを出しません（メニューの「設定を開く」などはそのまま使えます）' : 'このサイトでもボタンを出すように戻しました');
+    if (v) GM_setValue('force:' + location.host, false); // 「常に表示」とは同時にオンにしない
+    ui.toast(v ? 'このサイトではボタンを出しません（メニューの「設定を開く」などはそのまま使えます）' : 'このサイトでもボタンを出すように戻しました', 4000);
     check();
   });
   GM_registerMenuCommand('診断（ボタンが出ないとき）', () => {
@@ -4101,7 +4116,7 @@ ${body}</main></body></html>`;
 
   GM_registerMenuCommand('クラウドに今すぐ保存', () => backupNow(true));
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
-  GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
+  if (!sameSiteFrame) GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
   GM_registerMenuCommand('保存済みの訳を全削除', () => clearAllNovel());
   // この話の訳（本文・カカオの表示中翻訳・挿絵）を消して、ページを読み直す。ほかの話・作品メモ・クラウドは残す
   var lastCacheBase, lastSrcs; if (lastCacheBase === undefined) { lastCacheBase = ''; lastSrcs = []; }
@@ -4204,13 +4219,16 @@ ${body}</main></body></html>`;
     if (/(^|\.)comic\.naver\.com$/.test(h)) return 'wt';
     if (/jjwxc|archiveofourown/.test(h)) return 'novel';
     let txt = 0, big = 0, wide = 0;
-    const minW = Math.min(300, innerWidth * 0.6);
+    // Ridi・カカオページ：表紙やバナーを漫画と間違えないよう、画面幅いっぱいに近い画像だけ数える（スマホは画面が狭いので特に）
+    const readerSite = /ridibooks|page\.kakao/.test(h);
+    const minW = readerSite ? Math.min(600, innerWidth * 0.85) : Math.min(300, innerWidth * 0.6);
     for (const r of deepRoots()) {
       try { for (const el of collectParas(r)) { if (isUiText(el)) continue; txt += (el.textContent || '').trim().length; if (txt > 3000) break; } } catch { /* 数えられない */ }
       try { for (const im of r.querySelectorAll('img,canvas')) { const b = im.getBoundingClientRect(); if (b.width >= minW) { wide++; if (b.height >= 200) big++; } } } catch { /* 数えられない */ }
     }
     // 迷ったら切り替えない（今のモードのまま）。WTのページはコメントやあらすじで文字が多いこともあるので、
     // 画面幅の画像がたくさん並んでいたら（まだ読み込み中でも）小説にはしない
+    if (readerSite && txt > 3000 && big <= 8) return 'novel'; // 小説の本文がたくさんある（挿絵が何枚かあっても小説）
     if (big >= 5 || (big >= 3 && txt < 1500)) return 'wt';
     if (wide >= 3) return null;
     if (txt >= 400 && big <= 2) return 'novel';
