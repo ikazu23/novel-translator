@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.5.100
+// @version      10.6.0
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -598,12 +598,19 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash' };
   // 一覧に出す候補
   const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'] };
+  // 訳し方：読みやすさ寄り（今まで通り）・バランス・忠実寄り。temp は文のばらつき（null なら今まで通り）
+  const STYLES = {
+    read: { temp: null, note: '' },
+    bal: { temp: 0.5, note: '原文にない表現や、感情の強調を付け足さない。意訳は、直訳では訳文として不自然になるときだけにする。' },
+    faith: { temp: 0.3, note: '原文にない表現や、感情の強調を付け足さない。意訳は、直訳では訳文として不自然になるときだけにする。文の順番や言い回しはできるだけ原文どおりにし、言葉の意味を変えない。' },
+  };
+  const styleOf = c => STYLES[c && c.style] || STYLES.read;
   // 混雑時の予備（賢いモデルのみ。Lite系は入れない）
   const FALLBACKS = { gemini: 'gemini-3-flash-preview, gemini-2.5-flash', claude: '', openai: '' };
   // 作品メモの更新に使う安いモデル（空欄なら翻訳と同じモデル）
   const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '' };
   const DEF = {
-    mode: 'inplace', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
+    mode: 'inplace', style: 'read', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
     glossary: '',
   };
   // APIキー・モデル・予備モデルはエンジンごとに別々に保存（切り替えても入れ直さなくていい）
@@ -990,7 +997,7 @@ Rules:
     const flat = ctx + msg; // 共通部分を先頭に置く（Geminiの自動キャッシュが効きやすい）
     if (c.provider === 'gemini') {
       // 翻訳に「考える時間」は不要なので思考をオフ／最小にして高速化
-      const gc = { temperature: 0.8, maxOutputTokens: 32768 };
+      const gc = { temperature: styleOf(c).temp ?? 0.8, maxOutputTokens: 32768 };
       if (/gemini-2\.5-flash(?!-lite)/.test(model)) gc.thinkingConfig = { thinkingBudget: 0 };
       // 3系：Flashは最小（minimal）、Proは最小がlow
       else if (/gemini-3/.test(model)) gc.thinkingConfig = { thinkingLevel: /pro/.test(model) ? 'low' : 'minimal' };
@@ -1047,7 +1054,7 @@ Rules:
       return j.text;
     }
     const j = await req(c.baseUrl.replace(/\/$/, '') + '/chat/completions', { authorization: 'Bearer ' + c.key }, {
-      model, max_tokens: 8192, temperature: 1.0, stream: true,
+      model, max_tokens: 8192, temperature: styleOf(c).temp ?? 1.0, stream: true,
       messages: [{ role: 'system', content: system }, { role: 'user', content: flat }],
     }, { parse: parseOpenAI, onText });
     return j.text;
@@ -1199,6 +1206,8 @@ Rules:
   function buildUser(c, whole, ref, refLabel, body) {
     let user = `【ページタイトル】${pageTitle()}\n\n`;
     if (c.instructions.trim()) user += `【追加の指示（必ず従う。作品名の指定がある行は、ページタイトルが一致する作品にだけ適用）】\n${c.instructions.trim()}\n\n`;
+    const sn = styleOf(c).note;
+    if (sn) user += `【訳し方（必ず従う）】\n${sn}\n\n`;
     if (c.glossary.trim()) user += `【用語集（原語=訳語）】\n${c.glossary.trim()}\n\n`;
     const sheet = getSheet();
     if (sheet) user += `【この作品の人物・用語メモ（訳語・一人称・口調・呼び方はこれに合わせる）】\n${sheet}\n\n`;
@@ -3419,6 +3428,7 @@ ${body}</main></body></html>`;
           <label>作品メモの更新に使うモデル（空欄で既定。ClaudeはHaikuで安く） <input name="sheetModel"></label>
           <label><span class="sheet-title">この作品のメモ</span>（自動更新・手で直してもOK。作品のページで開いたときに表示） <textarea name="sheet"></textarea></label>
           <label>追加の指示（1行に1つ。作品ごとに書き分けてOK） <textarea name="instructions" placeholder="例：『作品名』主人公ソン・ユハン（男）の一人称は地の文・台詞とも「俺」"></textarea></label>
+          <label>訳し方（新しく訳す話から） <select name="style"><option value="read">読みやすさ寄り（今まで通り）</option><option value="bal">バランス（付け足しを控える）</option><option value="faith">忠実寄り（原文の言い回しどおり）</option></select></label>
           <div class="row"><button data-a="save" class="primary">保存</button><button data-a="cancel">戻る</button></div>
           <div class="sec">記録の引っ越し・バックアップ</div>
           <label>訳の記録（ほかの端末へ移すとき。APIキーは含まれません）</label>
@@ -3527,6 +3537,7 @@ ${body}</main></body></html>`;
       f('model').placeholder = MODELS[c.provider];
       f('fallback').placeholder = FALLBACKS[c.provider] || trUI('なし');
       f('adult').checked = !!c.adult;
+      f('style').value = STYLES[c.style] ? c.style : 'read';
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
       f('outLang').value = OUT_LANG; f('illust').checked = c.illust !== false; f('autoMode').checked = c.autoMode !== false;
@@ -3749,7 +3760,7 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, style: STYLES[f('style').value] ? f('style').value : 'read', adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
         if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
