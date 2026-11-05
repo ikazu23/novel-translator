@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.0
+// @version      10.6.1
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -27,6 +27,8 @@
 // @connect      generativelanguage.googleapis.com
 // @connect      api.anthropic.com
 // @connect      api.deepseek.com
+// @connect      127.0.0.1
+// @connect      localhost
 // @connect      api.github.com
 // @connect      gist.githubusercontent.com
 // @connect      fonts.googleapis.com
@@ -595,7 +597,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     return d.kztlWork ? [d.kztlTitle, d.kztlEpTitle].filter(Boolean).join(' ') || document.title : document.title;
   };
 
-  const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash' };
+  const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash', plamo: 'plamo' };
   // 一覧に出す候補
   const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'] };
   // 訳し方：読みやすさ寄り（今まで通り）・バランス・忠実寄り。temp は文のばらつき（null なら今まで通り）
@@ -606,9 +608,9 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   };
   const styleOf = c => STYLES[c && c.style] || STYLES.read;
   // 混雑時の予備（賢いモデルのみ。Lite系は入れない）
-  const FALLBACKS = { gemini: 'gemini-3-flash-preview, gemini-2.5-flash', claude: '', openai: '' };
+  const FALLBACKS = { gemini: 'gemini-3-flash-preview, gemini-2.5-flash', claude: '', openai: '', plamo: '' };
   // 作品メモの更新に使う安いモデル（空欄なら翻訳と同じモデル）
-  const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '' };
+  const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '', plamo: '' };
   const DEF = {
     mode: 'inplace', style: 'read', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
     glossary: '',
@@ -626,6 +628,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     const dsOld = { 'deepseek-chat': 'deepseek-flash', 'deepseek-reasoner': 'deepseek-v4-pro' };
     for (const o of [c.models, c.fallbacks, c.sheetModels]) if (typeof o.openai === 'string') o.openai = o.openai.replace(/(^|[,\s])(deepseek-chat|deepseek-reasoner)(?=$|[,\s])/g, (m, a, b) => a + dsOld[b]);
     c.key = c.keys[p] || ''; c.model = c.models[p] || ''; c.fallback = c.fallbacks[p] || ''; c.sheetModel = c.sheetModels[p] || '';
+    if (p === 'plamo' && !c.key) c.key = 'local'; // PLaMoはキー不要
     return c;
   };
 
@@ -990,10 +993,165 @@ Rules:
     return { text };
   };
 
+  // ---------- PLaMo（自分のスマホ・PCで動かす翻訳専用AI。llama.cpp の llama-server を使う） ----------
+  // 翻訳専用なので「番号を付けて返す」などの指示は使えない。1段落ずつ、前の訳・用語集・文脈を付けて訳し、いつもの形にして返す
+  const PLAMO_URL = 'http://127.0.0.1:8080';
+  let plamoQ = Promise.resolve(); // スマホの負担を減らすため、同時に1つずつ
+  const plamoRun = fn => { const p = plamoQ.then(fn, fn); plamoQ = p.catch(() => {}); return p; };
+  const plamoLang = l => (l === 'zh' ? 'zh-hans' : l === 'en' ? 'en' : l === 'ja' ? 'ja' : 'ko');
+  // 訳を少しずつ受け取る（onPart があれば、届いた分の訳をそのたびに渡す）
+  const plamoSSE = t => String(t || '').split('\n').filter(l => l.startsWith('data: ')).map(l => { try { return JSON.parse(l.slice(6)).content || ''; } catch { return ''; } }).join('');
+  function plamoPost(url, body, onPart) {
+    const stream = !!onPart;
+    // Tampermonkeyは「stream」で受け取ると途中経過が届く（ほかの拡張は onprogress で）
+    const tmStream = stream && typeof GM_info !== 'undefined' && /tampermonkey/i.test(GM_info.scriptHandler || '');
+    let handled = false;
+    const part = txt => { if (stream && txt) { try { onPart(plamoSSE(txt)); } catch { /* 途中の表示だけ */ } } };
+    return new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'POST', url: url.replace(/\/$/, '') + '/completion', timeout: 300000,
+      headers: { 'content-type': 'application/json' }, data: JSON.stringify(Object.assign({}, body, { stream })),
+      ...(tmStream ? { responseType: 'stream' } : {}),
+      onloadstart: async r => {
+        const st = r && r.response;
+        if (!tmStream || !st || typeof st.getReader !== 'function') return;
+        handled = true;
+        const reader = st.getReader(), dec = new TextDecoder();
+        let txt = '';
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            txt += typeof value === 'string' ? value : dec.decode(value, { stream: true });
+            part(txt);
+          }
+        } catch (e) { return rej(new Error('PLaMoにつながりません（' + (e && e.message) + '）')); }
+        if (r.status >= 400) return rej(new Error(r.status + ': PLaMo ' + txt.slice(0, 120)));
+        res(plamoSSE(txt));
+      },
+      onprogress: r => { if (!handled) part(r && r.responseText); },
+      onreadystatechange: r => { if (!handled && r && r.readyState === 3) part(r.responseText); },
+      onload: r => {
+        if (handled) return;
+        if (r.status >= 400) return rej(new Error(r.status + ': PLaMo ' + String(r.responseText || '').slice(0, 120)));
+        if (stream) return res(plamoSSE(r.responseText));
+        try { res(String(JSON.parse(r.responseText).content || '')); } catch { rej(new Error('PLaMoの返事を読めません')); }
+      },
+      onerror: () => rej(new Error('PLaMoにつながりません。llama-server を起動してから（スマホならTermux、PCならコマンドの画面で）、もう一度押してください。PCで動かしているときは、設定の「PLaMoのアドレス」も確認してください')),
+      ontimeout: () => rej(new Error('PLaMoの返事が5分来ません。スマホが重すぎるかもしれません')),
+    }));
+  }
+  // 用語集と作品メモから「原語=訳語」を拾う（その段落に出てくる語だけ渡す）
+  function plamoTerms(c) {
+    const out = [];
+    const add = line => {
+      const m = String(line).match(/^\s*([^=＝｜|\n]{1,40}?)\s*[=＝]\s*([^｜|\n]{1,40})/);
+      if (m && m[1].trim() && m[2].trim()) out.push([m[1].trim(), m[2].trim()]);
+    };
+    String(c.glossary || '').split('\n').forEach(add);
+    try { String(getSheet() || '').split('\n').forEach(add); } catch { /* メモなし */ }
+    return out;
+  }
+  const PT = k => '<|plamo:' + k + '|>';
+  // 前の頼み方の続きになるように組み立てる（同じ書き出しなら、PLaMoが前に読んだ分を覚えていて読み直さないので速い）
+  // 先頭：翻訳の指定・文脈・用語集（この回で同じ）→ これまでの原文と訳 → 今回の原文
+  function plamoPrompt(src, hist, head, sl, tl) {
+    const outTag = PT('tag') + 'output' + PT('key') + 'lang' + PT('val') + tl + (tl === 'ja' ? PT('key') + 'form' + PT('val') + 'plain' : '') + PT('msg');
+    let p = head;
+    for (const [s, t] of hist) p += PT('tag') + 'input' + PT('key') + 'lang' + PT('val') + sl + PT('msg') + s + '\n' + outTag + t + '\n';
+    return p + PT('tag') + 'input' + PT('key') + 'lang' + PT('val') + sl + PT('msg') + src + '\n' + outTag;
+  }
+  async function llmPlamo(c, msg, ref, onText) {
+    const url = (c.plamoUrl || '').trim() || PLAMO_URL;
+    const body = String(msg).split('【今回訳す部分】\n').pop();
+    // 番号付き（[[1]] 文）なら番号ごと、番号なしなら空行で区切られた段落ごと
+    const numbered = /\[\[\d+\]\]/.test(body);
+    const items = numbered
+      ? [...body.matchAll(/\[\[(\d+)\]\]\s*([\s\S]*?)(?=\s*\[\[\d+\]\]|$)/g)].map(m => [m[1], m[2].split(/\n\s*\n/)[0].trim()])
+      : body.split(/\n\s*\n/).map(t => [null, t.trim()]).filter(([, t]) => t);
+    const sl = plamoLang(curLang()), tl = plamoLang(OUT_LANG);
+    const terms = plamoTerms(c);
+    let context = pageTitle() ? '作品：' + pageTitle().slice(0, 80) : '';
+    if (ref) context += (context ? '\n' : '') + '直前の訳：' + String(ref).slice(-400);
+    // 速くするため、短い段落は何個かまとめて（改行でつないで）送り、返ってきた訳を改行で分ける。数が合わなければ1段落ずつ送り直す
+    const units = items.map(([n, raw]) => ({ n, src: stripTags(raw).trim(), t: null }));
+    const hist = [];
+    const show = () => { const out = []; for (const u of units) { if (u.t == null) break; out.push(u.n ? `[[${u.n}]] ${u.t}` : u.t); } return out.join('\n\n'); };
+    // 先頭部分：この回の原文に出てくる用語だけ（毎回同じ書き出しにして、読み直しを減らす）
+    const allSrc = units.map(u => u.src).join('\n');
+    const use = terms.filter(([a]) => allSrc.includes(a)).slice(0, 40);
+    let head = PT('tag') + 'dataset' + PT('msg') + 'translation\n';
+    if (context) head += PT('tag') + 'context' + PT('msg') + context.replace(/<\|plamo:[a-z]+\|>/g, '') + '\n';
+    if (use.length) head += PT('tag') + 'glossary' + use.map(([a, b]) => PT('index') + a + PT('item') + b).join('') + '\n';
+    // これまでの原文と訳は、長くなりすぎたら古い方から半分捨てる（そのときだけ読み直しになる）
+    const histLen = () => hist.reduce((n, [s, t]) => n + s.length + t.length, 0);
+    const one = async (src, maxHist, onPart) => {
+      if (histLen() > 3500) hist.splice(0, Math.ceil(hist.length / 2));
+      const prompt = plamoPrompt(src, hist, head, sl, tl);
+      const r = await plamoRun(() => plamoPost(url, {
+        prompt, n_predict: Math.min(3072, src.length * 3 + 64), temperature: 0.1, cache_prompt: true,
+        stop: [PT('tag'), PT('bos')],
+      }, onPart));
+      return r.replace(/<\|plamo:[a-z]+\|>/g, '').trim();
+    };
+    // 1段落ずつ送って、訳し終わったらすぐ画面に出す（前の分は読み直さないので、まとめなくても遅くならない）
+    let maxG = 1, sawPart = false;
+    const groups = { list: [], at: 0 };
+    const nextGroup = () => {
+      const g = []; let len = 0;
+      while (groups.at < units.length) {
+        const u = units[groups.at];
+        if (!/\p{L}/u.test(u.src)) { u.t = u.src; groups.at++; continue; } // 「◇」など文字のない段落は送らない
+        const alone = /\n/.test(u.src) || u.src.length > 500;
+        if (g.length && (alone || g.length >= maxG || len + u.src.length > 700)) break;
+        g.push(u); len += u.src.length; groups.at++;
+        if (alone) break;
+      }
+      return g.length ? g : null;
+    };
+    const tick = () => { if (onText) { try { const s = show(); const k = units.findIndex(u => u.t == null); onText(s + (numbered && k >= 0 ? `\n\n[[${units[k].n}]]` : '')); } catch { /* 途中の表示だけ */ } } };
+    for (let grp; (grp = nextGroup());) {
+      if (grp.length > 1) {
+        const joined = grp.map(u => u.src).join('\n');
+        // 1行訳し終わるごとに、すぐ画面に出す（最後の行は書いている途中なので出さない）
+        const onPart = part => {
+          const ls = String(part).split('\n'); ls.pop();
+          const done = ls.map(s => s.trim()).filter(Boolean);
+          let ch = false;
+          // 次の行が始まっていて、長さが原文とかけ離れていない行だけ（行がくっついた・分かれたときに、ずれた訳を出さないように）
+          if (done.length > grp.length) return;
+          grp.forEach((u, i) => {
+            if (i >= done.length || u.t != null) return;
+            const r = done[i].length / Math.max(1, u.src.length);
+            if (r < 0.3 || r > 3) return;
+            u.t = done[i]; u.tmp = true; ch = true;
+          });
+          if (ch) { sawPart = true; tick(); }
+        };
+        const lines = (await one(joined, 2, onPart)).split(/\n+/).map(s => s.trim()).filter(Boolean);
+        maxG = 1;
+        if (lines.length === grp.length) {
+          grp.forEach((u, i) => { u.t = lines[i]; u.tmp = false; });
+          hist.push([joined, lines.join('\n')]);
+          tick();
+          continue;
+        }
+        grp.forEach(u => { if (u.tmp) { u.t = null; u.tmp = false; } }); // 数が合わなかったので、先に出した分も1段落ずつやり直す
+      }
+      // 1段落ずつ（まとめて送ったら数が合わなかったときも）
+      for (const u of grp) {
+        u.t = (await one(u.src, 4)) || u.src;
+        hist.push([u.src, u.t]);
+        tick();
+      }
+    }
+    return show();
+  }
+
   async function llm(c, system, user, modelOverride, onText) {
     const model = modelOverride || c.model.trim() || MODELS[c.provider];
     const ctx = user && typeof user === 'object' ? user.ctx : '';
     const msg = user && typeof user === 'object' ? user.msg : user;
+    if (c.provider === 'plamo') return llmPlamo(c, msg, user && typeof user === 'object' ? user.ref : '', onText);
     const flat = ctx + msg; // 共通部分を先頭に置く（Geminiの自動キャッシュが効きやすい）
     if (c.provider === 'gemini') {
       // 翻訳に「考える時間」は不要なので思考をオフ／最小にして高速化
@@ -1153,7 +1311,7 @@ Rules:
   // 段落ごとの訳の記録（作品ごと）。ページの作りが端末で違っても、同じ段落なら記録から出せる
   // ---------- エンジンごとに訳を分けて保存（Claude版とGemini版を両方残す）----------
   const prov = () => cfg().provider || 'gemini';
-  const PROV_NAME = { gemini: 'Gemini', claude: 'Claude', openai: 'DeepSeek' };
+  const PROV_NAME = { gemini: 'Gemini', claude: 'Claude', openai: 'DeepSeek', plamo: 'PLaMo' };
   const provName = () => PROV_NAME[prov()] || prov();
   const legacyDone = new Set();
   // 前のバージョンの記録（エンジン名なし）は、そのエンジンでまだ訳していなければ引き継ぐ
@@ -1180,7 +1338,14 @@ Rules:
   }
 
   // 訳し終わったあとに裏で更新する（読むのは待たせない）
-  async function updateSheet(c, src, trText) {
+  async function updateSheet(c0, src, trText) {
+    let c = c0;
+    // PLaMoは訳すことしかできないので、作品メモの更新だけGeminiのキーで行う（Geminiのキーがなければ更新しない）
+    if (c0.provider === 'plamo') {
+      const gk = (c0.keys && c0.keys.gemini) || '';
+      if (!gk) return;
+      c = Object.assign({}, c0, { provider: 'gemini', key: gk, model: (c0.models && c0.models.gemini) || '', fallback: (c0.fallbacks && c0.fallbacks.gemini) || '', sheetModel: (c0.sheetModels && c0.sheetModels.gemini) || '' });
+    }
     if (!c.autoSheet || !trText.trim()) return;
     const k = sheetKey(), old = GM_getValue(k, '');
     const user = OUT_ZH ? `【当前笔记】\n${old || '（无）'}\n\n【本章原文】\n${src.slice(0, 30000)}\n\n【本章译文】\n${trText.slice(0, 30000)}\n\n`
@@ -1217,7 +1382,7 @@ Rules:
     let msg = '';
     if (ref) msg += `【${refLabel}（文体・呼称・一人称を合わせる）】\n${ref.slice(-1500)}\n\n`;
     msg += `【今回訳す部分】\n${body}`;
-    return { ctx: user, msg };
+    return { ctx: user, msg, ref: ref ? String(ref).slice(-1500) : '' };
   }
 
   // ---------- 晋江文学城など：本文の場所・<br>区切り ----------
@@ -2450,6 +2615,7 @@ ${bodyHtml}
 
   let liveErr = null;
   const liveSolo = new Set(); // 途中で止められた段落：次は1つだけで送る
+  const liveShownVal = new WeakMap(); // 訳している途中で画面に出した訳（最後の訳と違えば出し直す）
   async function liveTranslate(note, limit) {
     const c = cfg();
     if (!c.key) { ui.open(); ui.status('APIキーを設定してください'); ui.settings(true, 'novel'); return false; }
@@ -2479,6 +2645,7 @@ ${bodyHtml}
           if (i + 1 < maxN && pm.has(i + 1) && liveData.map[src] == null) {
             liveData.map[src] = clean(pm.get(i + 1), src);
             applyText(batch[i][1], liveData.map[src], src);
+            liveShownVal.set(batch[i][1], liveData.map[src]);
           }
         });
       };
@@ -2487,7 +2654,8 @@ ${bodyHtml}
         if (m.has(i + 1)) liveData.map[src] = clean(m.get(i + 1), src);
         else liveQueue.set(src, batch[i][1]); // 抜けたら次でもう一度
       });
-      batch.forEach(([src, el]) => { if (liveData.map[src] != null && el.textContent !== textApplied.get(el)) applyText(el, liveData.map[src], src); });
+      // 途中で出した訳が、最後の訳と違っていたら（まとめて訳した行の数がずれたときなど）出し直す
+      batch.forEach(([src, el]) => { if (liveData.map[src] != null && (el.textContent !== textApplied.get(el) || (liveShownVal.has(el) && liveShownVal.get(el) !== liveData.map[src]))) applyText(el, liveData.map[src], src); liveShownVal.delete(el); });
       batch.forEach(([src, el]) => applyLive(el, src));
       liveSave();
       setLast(liveText());
@@ -3407,6 +3575,7 @@ ${body}</main></body></html>`;
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
               <option value="openai">OpenAI互換（DeepSeekなど）</option>
+              <option value="plamo">PLaMo（スマホ・PCで動かす無料の翻訳AI）</option>
             </select></label>
           <label>APIキー（エンジンごとに保存） <input name="key" type="password" autocomplete="off"></label>
           <label>モデル名（空欄で既定） <input name="model"></label>
@@ -3419,6 +3588,7 @@ ${body}</main></body></html>`;
           <label class="check"><input type="checkbox" name="jaFont"> 訳文の漢字を日本の字形で表示（韓国風の漢字に違和感があるとき）</label>
           <label class="check"><input type="checkbox" name="adult"> 成人向け表現のブロックを外す（Geminiのみ）</label>
           <label>ベースURL（OpenAI互換のみ） <input name="baseUrl"></label>
+          <label>PLaMoのアドレス（PLaMoのみ。空欄なら http://127.0.0.1:8080） <input name="plamoUrl" placeholder="http://127.0.0.1:8080"></label>
           <label class="check"><input type="checkbox" name="quickStart"> 冒頭を先に表示する（オフにすると1話を1回で送れて安くなるが、表示まで待つ）</label>
           <label>同時に送る数（1で順番に。多いほど速いが回数制限に当たりやすい） <input name="parallel" type="number" min="1" max="6"></label>
           <label>1回に送る文字数 <input name="chunk" type="number" min="1000" step="500"></label>
@@ -3537,6 +3707,7 @@ ${body}</main></body></html>`;
       f('model').placeholder = MODELS[c.provider];
       f('fallback').placeholder = FALLBACKS[c.provider] || trUI('なし');
       f('adult').checked = !!c.adult;
+      f('plamoUrl').value = c.plamoUrl || '';
       f('style').value = STYLES[c.style] ? c.style : 'read';
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
@@ -3758,7 +3929,7 @@ ${body}</main></body></html>`;
           gistId: prev.gistId || '', gistToken: f('gistToken').value.trim(), autoBackup: f('autoBackup').checked,
           mode: f('mode').value, provider: f('provider').value, lang: f('lang').value,
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
-          baseUrl: f('baseUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
+          baseUrl: f('baseUrl').value.trim(), plamoUrl: f('plamoUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
           glossary: f('glossary').value, instructions: f('instructions').value, style: STYLES[f('style').value] ? f('style').value : 'read', adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
