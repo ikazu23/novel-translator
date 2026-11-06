@@ -64,6 +64,8 @@
 
 ほかに Claude や DeepSeek も使えます。
 
+**Solar**（韓国Upstageの AI）も使えます。Geminiの半分以下の料金で、意味はだいたい合っていますが、口調はGeminiよりそろいにくいです。[Upstage Console](https://console.upstage.ai/) でAPIキーを作り、設定の「エンジン」で **Solar** を選んでください。
+
 ---
 
 ## 3. 最初の設定

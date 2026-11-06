@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.1
+// @version      10.6.3
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -27,6 +27,7 @@
 // @connect      generativelanguage.googleapis.com
 // @connect      api.anthropic.com
 // @connect      api.deepseek.com
+// @connect      api.upstage.ai
 // @connect      127.0.0.1
 // @connect      localhost
 // @connect      api.github.com
@@ -597,9 +598,9 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     return d.kztlWork ? [d.kztlTitle, d.kztlEpTitle].filter(Boolean).join(' ') || document.title : document.title;
   };
 
-  const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash', plamo: 'plamo' };
+  const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash', plamo: 'plamo', solar: 'solar-pro4' };
   // 一覧に出す候補
-  const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'] };
+  const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'], solar: ['solar-pro4'] };
   // 訳し方：読みやすさ寄り（今まで通り）・バランス・忠実寄り。temp は文のばらつき（null なら今まで通り）
   const STYLES = {
     read: { temp: null, note: '' },
@@ -607,10 +608,12 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     faith: { temp: 0.3, note: '原文にない表現や、感情の強調を付け足さない。意訳は、直訳では訳文として不自然になるときだけにする。文の順番や言い回しはできるだけ原文どおりにし、言葉の意味を変えない。' },
   };
   const styleOf = c => STYLES[c && c.style] || STYLES.read;
+  // 1回に送る文字数：Solarは大きく渡すと形が崩れやすいので最大3000字（設定の値は変えない）
+  const chunkOf = c => (c && c.provider === 'solar' ? Math.min(+c.chunk || 4000, 3000) : c.chunk);
   // 混雑時の予備（賢いモデルのみ。Lite系は入れない）
-  const FALLBACKS = { gemini: 'gemini-3-flash-preview, gemini-2.5-flash', claude: '', openai: '', plamo: '' };
+  const FALLBACKS = { gemini: 'gemini-3-flash-preview, gemini-2.5-flash', claude: '', openai: '', plamo: '', solar: '' };
   // 作品メモの更新に使う安いモデル（空欄なら翻訳と同じモデル）
-  const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '', plamo: '' };
+  const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '', plamo: '', solar: '' };
   const DEF = {
     mode: 'inplace', style: 'read', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
     glossary: '',
@@ -1211,11 +1214,50 @@ Rules:
       if (j.stop === 'refusal') throw new Error('BLOCKED: refusal');
       return j.text;
     }
-    const j = await req(c.baseUrl.replace(/\/$/, '') + '/chat/completions', { authorization: 'Bearer ' + c.key }, {
+    // Solar（韓国Upstage）：OpenAI互換。原文を書き写したり同じ文を繰り返したりしやすいので、指示を足す
+    const solar = c.provider === 'solar';
+    const base = solar ? 'https://api.upstage.ai/v1' : c.baseUrl;
+    const sys2 = solar ? system + '\n\n【重要】原文をそのまま書き写さないこと。各段落は一度だけ訳し、同じ文を繰り返さないこと。訳文に原文の言葉や英語を混ぜないこと（原文で最初から英語で書かれている部分は英語のまま）。' + SOLAR_NOTE : system;
+    const j = await req(base.replace(/\/$/, '') + '/chat/completions', { authorization: 'Bearer ' + c.key }, {
       model, max_tokens: 8192, temperature: styleOf(c).temp ?? 1.0, stream: true,
-      messages: [{ role: 'system', content: system }, { role: 'user', content: flat }],
+      messages: [{ role: 'system', content: sys2 }, { role: 'user', content: flat }],
     }, { parse: parseOpenAI, onText });
+    if (solar) return solarRepair(c, base, model, msg, j.text);
     return j.text;
+  }
+
+  // Solar向けの追加の指示（Solarは英語の指示のほうが守りやすい）
+  const SOLAR_NOTE = '\n\nIMPORTANT: Output Japanese only. Do not copy the source text. Translate each paragraph exactly once and never repeat sentences. '
+    + 'Never leave Korean (Hangul) words untranslated, and never switch to English words — except words that are already written in English (Latin letters) in the source, which must stay exactly as they are. '
+    + 'Common mistakes to avoid: 하필 = よりによって (not なぜなぜ), 자리를 비우다 = 席を外す/留守にする, 코빼기도 안 보이다 = 影も形も見えない, 곁 = そば, 뻔하다 = 分かりきっている, 대련 = 手合わせ, 주술사 = 呪術師.';
+  // Solarの仕上げ：訳に韓国語や（原文にない）英語が混ざった段落だけを、もう一度Solarに直してもらう（直す段落だけ送るので安い）
+  async function solarRepair(c, base, model, msg, text) {
+    try {
+      const body = String(msg).split('【今回訳す部分】\n').pop();
+      if (!/\[\[\d+\]\]/.test(body) || !text) return text;
+      const src = new Map([...body.matchAll(/\[\[(\d+)\]\]\s*([\s\S]*?)(?=\s*\[\[\d+\]\]|$)/g)].map(m => [+m[1], m[2].split(/\n\s*\n/)[0].trim()]));
+      const tr = parseNum(text);
+      const hangul = /[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]/;
+      const strayEn = (s, o) => (s.match(/[A-Za-z][A-Za-z'-]{2,}/g) || []).some(w => !o.toLowerCase().includes(w.toLowerCase()));
+      const bad = [...tr].filter(([n, s]) => src.has(n) && (hangul.test(stripTags(s)) || strayEn(stripTags(s), stripTags(src.get(n))))).slice(0, 40);
+      if (!bad.length) return text;
+      const sys = '韓国語の小説を日本語に訳した文の、仕上げの直しをします。各段落の「訳」に混ざっている韓国語（ハングル）や英語の単語だけを、「原文」の意味に合う自然な日本語に直してください。'
+        + 'ほかの部分は変えないこと。原文で最初から英語で書かれている言葉は英語のまま残すこと。返すのは直した訳だけで、「[[番号]] 直した訳」の形で、受け取った番号すべてについて返すこと。'
+        + '\nFix only the stray Korean/English words in each translation; keep everything else unchanged. Keep words that are already in English in the source.';
+      const user = bad.map(([n, s]) => `[[${n}]]\n原文：${src.get(n)}\n訳：${s}`).join('\n\n');
+      const j = await req(base.replace(/\/$/, '') + '/chat/completions', { authorization: 'Bearer ' + c.key }, {
+        model, max_tokens: 8192, temperature: 0.2, stream: true,
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+      }, { parse: parseOpenAI });
+      const fix = parseNum(j.text || '');
+      let changed = false;
+      for (const [n] of bad) {
+        const v = fix.get(n);
+        if (v && !hangul.test(stripTags(v)) && stripTags(v).length >= stripTags(src.get(n)).length * 0.3) { tr.set(n, v); changed = true; } // 短すぎる返事（訳が抜けた）は使わない
+      }
+      if (!changed) return text;
+      return [...tr].map(([n, s]) => `[[${n}]] ${s}`).join('\n\n');
+    } catch { return text; } // 直しに失敗しても、最初の訳はそのまま使う
   }
 
   // 混雑(503)・回数制限(429)は、まず予備モデルに即切り替え。全部だめなときだけ待って再試行
@@ -1311,7 +1353,7 @@ Rules:
   // 段落ごとの訳の記録（作品ごと）。ページの作りが端末で違っても、同じ段落なら記録から出せる
   // ---------- エンジンごとに訳を分けて保存（Claude版とGemini版を両方残す）----------
   const prov = () => cfg().provider || 'gemini';
-  const PROV_NAME = { gemini: 'Gemini', claude: 'Claude', openai: 'DeepSeek', plamo: 'PLaMo' };
+  const PROV_NAME = { gemini: 'Gemini', claude: 'Claude', openai: 'DeepSeek', plamo: 'PLaMo', solar: 'Solar' };
   const provName = () => PROV_NAME[prov()] || prov();
   const legacyDone = new Set();
   // 前のバージョンの記録（エンジン名なし）は、そのエンジンでまだ訳していなければ引き継ぐ
@@ -1885,7 +1927,7 @@ ${bodyHtml}
     const c = cfg();
     if (!c.key) { ui.status('APIキーを設定してください'); return ui.settings(true, 'novel'); }
 
-    const chunks = makeChunks(paras.map(p => p.length), c.chunk, c.quickStart);
+    const chunks = makeChunks(paras.map(p => p.length), chunkOf(c), c.quickStart);
     const whole = chunks.length > 1 && src.length <= 30000 ? src : '';
     const par = Math.max(1, +c.parallel || 1);
 
@@ -2220,7 +2262,7 @@ ${bodyHtml}
       const redo = srcs.map((_, i) => i).filter(i => !skip.has(i) && needsFix(tr[i]));
       if (!redo.length) break;
       ui.toast(`${L().name}が残った${redo.length}段落を自動で訳し直し中…${round > 1 ? '（2回目）' : ''}`);
-      const groups = makeChunks(redo.map(i => srcs[i].length), Math.min(c.chunk, 3000)).map(g => g.map(j => redo[j]));
+      const groups = makeChunks(redo.map(i => srcs[i].length), Math.min(chunkOf(c), 3000)).map(g => g.map(j => redo[j]));
       await pool(Math.max(1, +c.parallel || 1), groups.length, async g => {
         const ids = groups[g];
         const user = buildUser(c, whole, ref, 'この話の冒頭の訳文', ids.map(i => `[[${i + 1}]] ${srcs[i]}`).join('\n\n'));
@@ -2625,7 +2667,7 @@ ${bodyHtml}
     let len = 0;
     for (const e of liveQueue.entries()) {
       if (liveSolo.has(e[0])) { if (batch.length) continue; batch.push(e); break; }
-      if (batch.length && len + e[0].length > (limit || +c.chunk || 4000)) break;
+      if (batch.length && len + e[0].length > (limit || +chunkOf(c) || 4000)) break;
       batch.push(e); len += e[0].length + 8;
     }
     batch.forEach(([k]) => liveQueue.delete(k));
@@ -2816,7 +2858,7 @@ ${bodyHtml}
     const c = cfg();
     const par = Math.max(1, +c.parallel || 1);
     const total = [...liveQueue.keys()].reduce((a, k) => a + k.length + 8, 0);
-    const limit = Math.min(+c.chunk || 4000, Math.max(1200, Math.ceil(total / par)));
+    const limit = Math.min(+chunkOf(c) || 4000, Math.max(1200, Math.ceil(total / par)));
     const worker = async () => {
       while (liveQueue.size && !liveErr) { if (!(await liveTranslate(note, limit))) break; }
     };
@@ -3180,7 +3222,7 @@ ${body}</main></body></html>`;
       return ui.toast('保存済みの訳を表示中（段落ごとの記録から）', 2500);
     }
     if (need.length < srcs.length) { applyTr(els, tr); ui.toast(`記録にある${srcs.length - need.length}段落はそのまま表示、残り${need.length}段落を翻訳します`, 2500); }
-    const chunks = makeChunks(need.map(i => srcs[i].length), c.chunk, c.quickStart).map(g => g.map(j => need[j]));
+    const chunks = makeChunks(need.map(i => srcs[i].length), chunkOf(c), c.quickStart).map(g => g.map(j => need[j]));
     const whole = (chunks.length > 1 || need.length < srcs.length) && src.length <= 30000 ? src : '';
     const par = Math.max(1, +c.parallel || 1);
 
@@ -3575,6 +3617,7 @@ ${body}</main></body></html>`;
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
               <option value="openai">OpenAI互換（DeepSeekなど）</option>
+              <option value="solar">Solar（韓国Upstage・安い）</option>
               <option value="plamo">PLaMo（スマホ・PCで動かす無料の翻訳AI）</option>
             </select></label>
           <label>APIキー（エンジンごとに保存） <input name="key" type="password" autocomplete="off"></label>
