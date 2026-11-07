@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.3
+// @version      10.6.5
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -616,7 +616,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '', plamo: '', solar: '' };
   const DEF = {
     mode: 'inplace', style: 'read', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
-    glossary: '',
+    glossary: '', bili: false,
   };
   // APIキー・モデル・予備モデルはエンジンごとに別々に保存（切り替えても入れ直さなくていい）
   const cfg = () => {
@@ -1516,6 +1516,7 @@ Rules:
     if (copyCtx && copyCtx.href === pageId()) {
       try { text = buildCopy(copyCtx) || lastText; } catch { /* 失敗したら単純なコピー */ }
     }
+    text = noWm(text);
     try { GM_setClipboard(text, 'text'); }
     catch { navigator.clipboard?.writeText(text); }
     ui.toast(`訳文をコピーしました（${text.length}字）`, 2500);
@@ -1689,7 +1690,7 @@ Rules:
       const props = [...SAVE_PROPS];
       if (!o.textContent.trim()) props.push(...BOX_PROPS);
       c.setAttribute('style', props.map(p => `${p}:${solid(cs.getPropertyValue(p))}`).join(';'));
-      for (const at of [...c.attributes]) if (/^on/i.test(at.name) || at.name === 'class' || at.name === 'id') c.removeAttribute(at.name);
+      for (const at of [...c.attributes]) if (/^on/i.test(at.name) || at.name === 'class' || at.name === 'id' || /^data-kztl-/.test(at.name)) c.removeAttribute(at.name);
       if (c.tagName === 'IMG' && o.src) c.setAttribute('src', o.src);
       if (c.tagName === 'IMG') { const ib = illustFor(o); if (ib && c.parentNode) { const d = document.createElement('div'); d.setAttribute('style', 'margin:.6em 0 1.2em;text-align:center'); d.innerHTML = ib.html; c.parentNode.insertBefore(d, c.nextSibling); } }
       if (c.tagName === 'A') c.removeAttribute('href');
@@ -1730,7 +1731,7 @@ ${dataTag}</head>
 <main style="max-width:${Math.max(w, 320)}px;margin:0 auto;padding:16px;box-sizing:border-box">
 ${bodyHtml}
 </main></body></html>`;
-    const blob = new Blob([html], { type: 'text/html' });
+    const blob = new Blob([noWm(html)], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -2183,10 +2184,45 @@ ${bodyHtml}
     jaOrig.clear();
   }
 
+  // ---------- 対訳表示：訳の段落の下に原文を小さく並べる ----------
+  // 原文は data-kztl-src に入れて CSS の ::after で見せるだけ（ページの中身は増やさない）。保存・コピー・イカ墨ノベルには入らない
+  const WM_RE = /[\u200B\u2060-\u2064\uFEFF]/g; // Ridiなどが本文に入れる見えない透かし文字
+  const noWm = s => String(s == null ? '' : s).replace(WM_RE, '');
+  let biliStyleDone = false;
+  function biliStyle() {
+    if (biliStyleDone) return; biliStyleDone = true;
+    const st = document.createElement('style');
+    st.id = 'kztl-bili';
+    st.textContent = 'html.kztl-bi [data-kztl-src]::after{content:attr(data-kztl-src);display:block;white-space:pre-wrap;'
+      + 'font-size:.8em;line-height:1.6;font-weight:normal;font-style:normal;text-indent:0;text-align:left;letter-spacing:normal;'
+      + 'opacity:.55;border-left:2px solid currentColor;padding:.1em 0 .1em .7em;margin:.35em 0 .5em;}'
+      // 両端揃えのサイト（Ridiなど）は日本語の文字の間が空いて見えるので、対訳表示中だけ左揃えにする
+      + 'html.kztl-bi [data-kztl-just]{text-align:start!important;}';
+    (document.head || document.documentElement).appendChild(st);
+  }
+  const biliOn = () => { try { return !!cfg().bili; } catch { return false; } };
+  function syncBili() {
+    const on = biliOn();
+    if (on) biliStyle();
+    document.documentElement.classList.toggle('kztl-bi', on);
+  }
+  function setSrcAttr(el, src) {
+    const s = noWm(src).trim();
+    if (!s || !/\p{L}/u.test(s)) return;
+    el.setAttribute('data-kztl-src', s);
+    try { if (getComputedStyle(el).textAlign === 'justify') el.setAttribute('data-kztl-just', ''); } catch { /* 測れない */ }
+  }
+  // 位置や大きさを測るあいだだけ原文を隠す（保存・イカ墨ノベル用の空行や囲みの判定が変わらないように）
+  const biliOff = fn => function (...a) {
+    const h = document.documentElement, on = h.classList.contains('kztl-bi');
+    if (on) h.classList.remove('kztl-bi');
+    try { return fn.apply(this, a); } finally { if (on) h.classList.add('kztl-bi'); }
+  };
+
   function applyTr(els, tr) {
     els.forEach((el, i) => {
       if (tr[i] == null || !el.isConnected) return;
-      if (!applied.has(el)) applied.set(el, el.innerHTML);
+      if (!applied.has(el)) { applied.set(el, el.innerHTML); setSrcAttr(el, el.textContent); }
       rebuild(el, tr[i]);
       el.setAttribute('data-kztl-tr', ''); // 訳文を表示中の印（ページ側が編集前に確認できるように）
       markJa(el);
@@ -2202,7 +2238,7 @@ ${bodyHtml}
     clearOverlays();
     restoreText();
     unmarkJa();
-    for (const [el, html] of applied) if (el.isConnected) { el.innerHTML = html; el.removeAttribute('data-kztl-tr'); }
+    for (const [el, html] of applied) if (el.isConnected) { el.innerHTML = html; el.removeAttribute('data-kztl-tr'); el.removeAttribute('data-kztl-src'); el.removeAttribute('data-kztl-just'); }
     applied.clear();
     inPlaceOn = false;
     ui.fabLabel('訳');
@@ -2816,6 +2852,7 @@ ${bodyHtml}
       if (!m[1]) stack.push(+m[2]); else if (stack.length > 1) stack.pop();
     }
     buf += t.slice(last); flush();
+    if (!textApplied.has(el)) setSrcAttr(el, src ? stripTags(src) : el.textContent);
     const slots = textSlots(el);
     let leftover = '';
     for (const [id, parts0] of segs) if (!slots.has(id)) leftover += parts0.join('');
@@ -2837,6 +2874,7 @@ ${bodyHtml}
 
   function restoreText() {
     for (const [n, v] of textOrig) if (n.isConnected) n.nodeValue = v;
+    for (const el of textApplied.keys()) { try { el.removeAttribute('data-kztl-src'); el.removeAttribute('data-kztl-just'); } catch { /* 消えた要素 */ } }
     textOrig.clear();
     textApplied.clear();
     unmarkJa();
@@ -3124,7 +3162,7 @@ ${body}</main></body></html>`;
     const eps = [...w.pages.values()].map(list => list.find(v => v.prov === prov()) || list.sort((a, b) => b.at - a.at)[0]);
     eps.sort((a, b) => (a.num ?? 1e9) - (b.num ?? 1e9) || a.at - b.at);
     const safe = t => String(t || '').replace(/[\\/:*?"<>|]/g, '_').slice(0, 70);
-    const files = eps.map((v, i) => ({ name: String(v.num ?? i + 1).padStart(4, '0') + '_' + safe(v.title) + '.html', text: epHtml(v.data) }));
+    const files = eps.map((v, i) => ({ name: String(v.num ?? i + 1).padStart(4, '0') + '_' + safe(v.title) + '.html', text: noWm(epHtml(v.data)) }));
     const blob = makeZip(files);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -3143,7 +3181,7 @@ ${body}</main></body></html>`;
   }
 
   function downloadHtml(html, title) {
-    const blob = new Blob([html], { type: 'text/html' });
+    const blob = new Blob([noWm(html)], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -3629,6 +3667,7 @@ ${body}</main></body></html>`;
           <label class="check"><input type="checkbox" name="illust"> 挿絵の中の文字も訳す（「訳」を押したとき。Geminiのキーを使い、挿絵1枚ごとに料金）</label>
           <label class="check"><input type="checkbox" name="autoMode"> 開いたページに合わせて小説／WTモードを自動で切り替える</label>
           <label class="check"><input type="checkbox" name="jaFont"> 訳文の漢字を日本の字形で表示（韓国風の漢字に違和感があるとき）</label>
+          <label class="check"><input type="checkbox" name="bili"> 対訳表示（訳の段落の下に原文を小さく並べる）</label>
           <label class="check"><input type="checkbox" name="adult"> 成人向け表現のブロックを外す（Geminiのみ）</label>
           <label>ベースURL（OpenAI互換のみ） <input name="baseUrl"></label>
           <label>PLaMoのアドレス（PLaMoのみ。空欄なら http://127.0.0.1:8080） <input name="plamoUrl" placeholder="http://127.0.0.1:8080"></label>
@@ -3754,6 +3793,7 @@ ${body}</main></body></html>`;
       f('style').value = STYLES[c.style] ? c.style : 'read';
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
+      f('bili').checked = !!c.bili;
       f('outLang').value = OUT_LANG; f('illust').checked = c.illust !== false; f('autoMode').checked = c.autoMode !== false;
       f('gistToken').value = c.gistToken || ''; f('autoBackup').checked = c.autoBackup !== false;
       f('autoSheet').checked = !!c.autoSheet;
@@ -3974,7 +4014,7 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), plamoUrl: f('plamoUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, style: STYLES[f('style').value] ? f('style').value : 'read', adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, style: STYLES[f('style').value] ? f('style').value : 'read', adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, bili: f('bili').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
         if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
@@ -4087,6 +4127,7 @@ ${body}</main></body></html>`;
   let scanId = '', scanLeft = 0, scanHit = false, scanTick = 0;
   const snapDone = new Set();
   const check = () => {
+    try { syncBili(); } catch { /* 対訳表示なし */ }
     try { ui.ilMark(ilMarked()); } catch { /* ボタンなし */ }
     if ((inPlaceOn || textApplied.size) && !busy && !snapDone.has(pageId() + prov())) { snapDone.add(pageId() + prov()); snapLater(); }
     if (liveData && liveData.key !== liveKey()) clearOverlays(); // 別の話に移ったら重ね表示を外す
@@ -4122,11 +4163,19 @@ ${body}</main></body></html>`;
     if (wtPage) syncWT();
   };
   check();
+  // 対訳表示中でも、保存用の測り方は今まで通りに
+  episodeData = biliOff(episodeData); buildCopy = biliOff(buildCopy); saveHtml = biliOff(saveHtml); layoutLines = biliOff(layoutLines);
+  sceneLayout = biliOff(sceneLayout); liveBuild = biliOff(liveBuild); snapshotEp = biliOff(snapshotEp); liveSaveHtml = biliOff(liveSaveHtml);
+  try { syncBili(); } catch { /* 対訳表示なし */ }
   setInterval(check, 3000);
 
   // ---------- メニュー ----------
   GM_registerMenuCommand('設定を開く', () => { ui.open(); ui.settings(true); });
   GM_registerMenuCommand('この話を翻訳し直す（上書き表示）', () => translateInPlace(true));
+  GM_registerMenuCommand('対訳表示（原文を下に並べる）の切り替え', () => {
+    const c = GM_getValue('cfg', {}); c.bili = !c.bili; GM_setValue('cfg', c); syncBili();
+    ui.toast(c.bili ? '対訳表示：オン（訳の下に原文を並べます）' : '対訳表示：オフ', 2500);
+  });
   if (EXPORT_OK) { GM_registerMenuCommand('訳文をコピー', copyText); GM_registerMenuCommand('訳したページをHTMLで保存', saveHtml); }
   GM_registerMenuCommand('ボタンの位置をリセット', () => { GM_deleteValue('pos:' + location.host); location.reload(); });
   GM_registerMenuCommand('下まで読み込んでから翻訳（本文が途中までしか訳されないとき）', async () => {
@@ -4278,7 +4327,7 @@ ${body}</main></body></html>`;
   function novelHandoff() {
     if (OUT_X || window.top !== window.self || location.host !== 'ikazu23.github.io') return;
     const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    const post = o => { try { W.postMessage('kztlNovel:' + JSON.stringify(o), location.origin); } catch (e) { /* 渡せない */ } };
+    const post = o => { try { W.postMessage('kztlNovel:' + noWm(JSON.stringify(o)), location.origin); } catch (e) { /* 渡せない */ } };
     // 訳の中身だけの指紋（空行の数・囲みの余白のような、画面の位置で少し変わるものは入れない）
     const sigOf = data => hashStr(JSON.stringify(((data && data.paras) || []).filter(x => x && !x.blank && !x.ilNote)
       .map(x => [x.html != null ? x.html : (x.text || ''), x.align || '', x.color || '', x.sizeRatio || '', x.box ? x.box.s + '|' + x.box.c + (x.box.b || x.box.r || x.box.w ? '|' + JSON.stringify([x.box.b || null, x.box.r || 0, x.box.w || 0]) : '') : ''])));
