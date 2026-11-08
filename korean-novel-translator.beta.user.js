@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.5
+// @version      10.6.6
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -2079,7 +2079,8 @@ ${bodyHtml}
       }
       return out;
     };
-    let text = walk(el).replace(/\s+/g, ' ').trim();
+    // Ridiなどの見えない透かし文字は開くたびに変わることがあるので、訳の記録と照らし合わせる前に消す
+    let text = walk(el).replace(WM_RE, '').replace(/\s+/g, ' ').trim();
     // 1文字ずつ装飾されている演出などで目印が多すぎると訳が崩れるので、その段落は装飾なしで訳す
     if (count > 12) { text = stripTags(text); count = 0; }
     if (count) tplMap.set(el, tpl); else tplMap.delete(el);
