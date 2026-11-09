@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.7
+// @version      10.6.8
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -586,7 +586,24 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   const LZ = () => LANGS_ZH[curLang()] || LANGS_ZH.ko;
   const ko = s => countAs(curLang(), s);
   // 訳文に原文の言語が残っているか（残りの文字数。少しなら0）
-  const leftIn = t => { const n = ko(t); return n >= L().min ? n : 0; };
+  // 文字化けの中のハングル（前後がどちらも空白・ハングル・数字・句読点以外の文字に挟まれた短い並び。例：u뀞Ⅵ）
+  const GLITCH_SIDE = /[^\s\uAC00-\uD7A3\u3130-\u318F0-9.,!?…·~'"“”‘’()\[\]「」『』<>\-]/;
+  function glitchRuns(src) {
+    const out = new Set(), s = String(src || '');
+    for (const m of s.matchAll(/[\uAC00-\uD7A3\u3130-\u318F]{1,3}/g)) {
+      const a = s[m.index - 1], b = s[m.index + m[0].length];
+      if (a && b && GLITCH_SIDE.test(a) && GLITCH_SIDE.test(b)) out.add(m[0]);
+    }
+    return out;
+  }
+  // 訳文から、原文の文字化けをそのまま写したハングルを除く（わざと残したものは「訳し忘れ」にしない）
+  function dropGlitch(t, src) {
+    if (!src || curLang() !== 'ko') return t;
+    const runs = glitchRuns(src);
+    if (!runs.size) return t;
+    return String(t).replace(/[\uAC00-\uD7A3\u3130-\u318F]+/g, r => (runs.has(r) ? '' : r));
+  }
+  const leftIn = (t, src) => { const n = ko(src ? dropGlitch(t, src) : t); return n >= L().min ? n : 0; };
   const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36) + s.length; };
 
   // イカ墨ノベルなど、ページ側が作品・話の目印を出しているときはそれを使う
@@ -645,7 +662,8 @@ Rules:
 - If a glossary or character notes are given, always follow them.
 - ${l.names}
 - Output only the translation. No preface, notes or headings.
-- Reproduce glitched text, mechanical voices, chants, repetitions and spacing effects in English with the same feel; do not leave them in ${l.name}.
+- Mojibake (an unreadable jumble of random CJK characters, symbols, Hangul and Latin letters) must not be translated: copy it exactly as it is, character for character.
+- Reproduce mechanical voices, chants, broken sentences, repetitions and spacing effects in English with the same feel; do not leave them in ${l.name}.
 - Do not include the original text. Do not use formats like "original -> translation" or "original (translation)". Leave no ${l.name} at all, including in-story rules, system messages, slogans and quotations. Keep the layout of tables and symbols (such as |) and translate only the ${l.name} inside.`; };
   const sysZh = () => { const l = LZ(); return `你是一名文学翻译，负责将${l.novel}翻译成简体中文。
 规则：
@@ -657,7 +675,8 @@ Rules:
 - 如果给出了术语表或作品笔记，必须遵守。
 - ${l.names}
 - 只输出译文。不要加前言、注释或标题。
-- 乱码、机械音、咒语般的句子、重复、字间空格等效果，也要用中文以相同的感觉再现，不要保留${l.name}。
+- 乱码（汉字、符号、韩文、英文字母胡乱混在一起、无法阅读的字符串）不要翻译，原样一字不改地输出。
+- 机械音、咒语般的句子、重复、字间空格等效果，要用中文以相同的感觉再现，不要保留${l.name}。
 - 不要在输出中包含原文。不要使用“原文 -> 译文”或“原文（译文）”的对照格式。包括作品中的规则文、系统消息、标语、引文在内，一个${l.name}字也不要留下。表格和符号（如 |）的形式保持不变，只翻译其中的${l.name}。`; };
   const sys = () => { if (OUT_EN) return sysEn(); if (OUT_ZH) return sysZh(); const l = L(); return `あなたは${l.novel}を日本語に訳す文芸翻訳者です。
 ルール:
@@ -669,8 +688,9 @@ Rules:
 - 用語集・作品メモがある場合、その訳語に必ず従う。
 - ${l.names}
 - 出力は訳文のみ。前置き、注釈、見出しは一切付けない。
-- 文字化け・機械音声・呪文のような崩れた文や繰り返し、文字の間の空白などの演出も、${l.name}のまま残さず、同じ雰囲気の日本語で再現する。
-- 原文を出力に含めない。「原文 -> 訳文」や「原文（訳文）」のような対訳形式にしない。作中のルール文・システムメッセージ・標語・引用文なども含め、${l.name}の文は一文字も残さない。表や記号（| など）の形はそのまま保ち、中の${l.name}だけを日本語にする。`; };
+- 文字化け（漢字・記号・ハングル・英字などがでたらめに混ざった、読めない文字の羅列）は訳さず、原文の文字を一字も変えずにそのまま出す。
+- 機械音声・呪文のような崩れた文や繰り返し、文字の間の空白などの演出は、${l.name}のまま残さず、同じ雰囲気の日本語で再現する。
+- 原文を出力に含めない。「原文 -> 訳文」や「原文（訳文）」のような対訳形式にしない。作中のルール文・システムメッセージ・標語・引用文なども含め、${l.name}の文は一文字も残さない（文字化けの羅列だけは例外）。表や記号（| など）の形はそのまま保ち、中の${l.name}だけを日本語にする。`; };
 
   const sysNum = () => OUT_ZH ? sys() + `
 - 输入的每个段落开头都有 [[编号]]。输出时每个段落开头也要按相同顺序加上相同的 [[编号]]。一个编号对应一个段落。不要增加、删除、合并或拆分编号。
@@ -1393,7 +1413,7 @@ Rules:
   function saveParas(srcs, tr) {
     const m = getParaMap();
     let n = 0;
-    srcs.forEach((src, i) => { if (tr[i] != null && !needsFix(tr[i]) && m[src] !== tr[i]) { m[src] = tr[i]; n++; } });
+    srcs.forEach((src, i) => { if (tr[i] != null && !needsFix(tr[i], src) && m[src] !== tr[i]) { m[src] = tr[i]; n++; } });
     if (n) GM_setValue(paraKey(), m);
   }
 
@@ -2313,13 +2333,13 @@ ${bodyHtml}
   }
 
   // 韓国語が残っている（または訳が抜けた）段落か
-  const needsFix = t => t == null || leftIn(t) > 0;
+  const needsFix = (t, src) => t == null || leftIn(t, src) > 0;
 
   // 韓国語が残った段落だけ、小さく分けて最大2回まで訳し直す
   async function fixLeftovers(c, els, srcs, tr, whole, ref, skip) {
     let err = null;
     for (let round = 1; round <= 2; round++) {
-      const redo = srcs.map((_, i) => i).filter(i => !skip.has(i) && needsFix(tr[i]));
+      const redo = srcs.map((_, i) => i).filter(i => !skip.has(i) && needsFix(tr[i], srcs[i]));
       if (!redo.length) break;
       ui.toast(`${L().name}が残った${redo.length}段落を自動で訳し直し中…${round > 1 ? '（2回目）' : ''}`);
       const groups = makeChunks(redo.map(i => srcs[i].length), Math.min(chunkOf(c), 3000)).map(g => g.map(j => redo[j]));
@@ -2332,14 +2352,14 @@ ${bodyHtml}
           for (const i of ids) {
             if (!m.has(i + 1)) continue;
             const t = clean(m.get(i + 1), srcs[i]);
-            if (t && (tr[i] == null || leftIn(t) < leftIn(tr[i]))) tr[i] = t;
+            if (t && (tr[i] == null || leftIn(t, srcs[i]) < leftIn(tr[i], srcs[i]))) tr[i] = t;
           }
         } catch (e) {
           if (/^BLOCKED/.test(e.message) && e.partial) {
             // 途中で止められた：訳せた段落は使い、止められた段落だけ諦める（後ろの段落は次の回でもう一度）
             const pm = parseNum(e.partial), cn = cutNum(e.partial);
             for (const i of ids) {
-              if (i + 1 < cn && pm.has(i + 1)) { const t = clean(pm.get(i + 1), srcs[i]); if (t && (tr[i] == null || leftIn(t) < leftIn(tr[i]))) tr[i] = t; }
+              if (i + 1 < cn && pm.has(i + 1)) { const t = clean(pm.get(i + 1), srcs[i]); if (t && (tr[i] == null || leftIn(t, srcs[i]) < leftIn(tr[i], srcs[i]))) tr[i] = t; }
               else if (i + 1 === cn) skip.add(i);
             }
           } else if (/^BLOCKED/.test(e.message)) ids.forEach(i => skip.add(i));
@@ -2349,7 +2369,7 @@ ${bodyHtml}
         setLast(tr.map((t, i) => toPlain(els[i], t ?? srcs[i])).join('\n\n'));
       });
     }
-    return { left: srcs.filter((_, i) => !skip.has(i) && needsFix(tr[i])).length, err };
+    return { left: srcs.filter((_, i) => !skip.has(i) && needsFix(tr[i], srcs[i])).length, err };
   }
 
   // 下までスクロールして、あとから読み込まれる本文を全部読み込ませる（終わったら元の位置に戻す）
@@ -2956,7 +2976,7 @@ ${bodyHtml}
     else recordScene(items.map(x => x.src), sceneLayout(items.map(x => x.el)));
     items.forEach(({ el, src }) => { applyLive(el, src); applyText(el, liveData.map[src], src); });
     liveErr = null;
-    const hasKo = src => liveData.map[src] == null || leftIn(liveData.map[src]) > 0;
+    const hasKo = src => liveData.map[src] == null || leftIn(liveData.map[src], src) > 0;
     let didWork = false;
     if (liveQueue.size) {
       setBusy(true); didWork = true;
@@ -2973,7 +2993,7 @@ ${bodyHtml}
           await runParallel(OUT_ZH ? `（注意：上次这些句子残留了${LZ().name}。请务必在每个段落开头加上 [[编号]]，全部译成中文，不要留下任何${LZ().name}。）` : OUT_EN ? `(Note: last time ${LE().name} was left in these lines. Always start each paragraph with its [[number]] and translate everything into English, leaving no ${LE().name}.)` : `（注意：前回これらの文は${L().name}が残りました。必ず各段落の先頭に [[番号]] を付け、${L().name}を一文字も残さず日本語だけで訳してください）`);
           bad.forEach(({ el, src }) => {
             const old = before[src], cur = liveData.map[src];
-            if (old != null && (cur == null || leftIn(cur) > leftIn(old))) liveData.map[src] = old; // 前より悪くなったら前の訳を使う
+            if (old != null && (cur == null || leftIn(cur, src) > leftIn(old, src))) liveData.map[src] = old; // 前より悪くなったら前の訳を使う
             reapplyText(el, liveData.map[src], src);
           });
         }
@@ -3249,7 +3269,7 @@ ${body}</main></body></html>`;
       setLast(cached.map((t, i) => toPlain(els[i], t ?? srcs[i])).join('\n\n'));
       snapLater(); // 保存済みの訳を出したときも控えを作り直す
       const c0 = cfg();
-      const bad = cached.filter(needsFix).length;
+      const bad = cached.filter((t, i) => needsFix(t, srcs[i])).length;
       // 自動修正は1話につき1回だけ（わざと韓国語の演出などで毎回料金がかかるのを防ぐ）
       if (!bad || !c0.key || GM_getValue(key + ':fx')) return ui.toast(bad ? `保存済みの${provName()}版の訳を表示中（${bad}段落は${L().name}のまま。「再翻訳」で訳し直せます）` : `保存済みの${provName()}版の訳を表示中`, bad ? 4000 : 2500);
       GM_setValue(key + ':fx', 1);
