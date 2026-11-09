@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.6
+// @version      10.6.7
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -600,7 +600,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
 
   const MODELS = { gemini: 'gemini-3.5-flash', claude: 'claude-sonnet-5', openai: 'deepseek-flash', plamo: 'plamo', solar: 'solar-pro4' };
   // 一覧に出す候補
-  const CANDIDATES = { claude: ['claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'], solar: ['solar-pro4'] };
+  const CANDIDATES = { claude: ['claude-sonnet-5-5', 'claude-sonnet-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001'], openai: ['deepseek-flash', 'deepseek-v4-pro'], solar: ['solar-pro4'] };
   // 訳し方：読みやすさ寄り（今まで通り）・バランス・忠実寄り。temp は文のばらつき（null なら今まで通り）
   const STYLES = {
     read: { temp: null, note: '' },
@@ -961,6 +961,29 @@ Rules:
             .map(m => m.name.replace(/^models\//, ''))
             .filter(n => /^gemini-\d/.test(n) && !/lite|image|tts|audio|live|embed|robotics|computer|nano/i.test(n))
             .sort().reverse());
+        } catch (e) { rej(e); }
+      },
+      onerror: () => rej(new Error('通信エラー')), ontimeout: () => rej(new Error('タイムアウト')),
+    }));
+  }
+
+  // Claude・OpenAI互換（DeepSeekなど）・Solarの、今使えるモデルの一覧を取る（新しいモデルが出ても選べるように）
+  function listOtherModels(prov, key, baseUrl) {
+    const claude = prov === 'claude';
+    const url = claude ? 'https://api.anthropic.com/v1/models?limit=100'
+      : (prov === 'solar' ? 'https://api.upstage.ai/v1' : String(baseUrl || DEF.baseUrl).trim().replace(/\/+$/, '')) + '/models';
+    const headers = claude ? { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }
+      : { Authorization: 'Bearer ' + key };
+    return new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'GET', url, headers, timeout: 30000,
+      onload: r => {
+        try {
+          const j = JSON.parse(r.responseText);
+          if (r.status >= 400) return rej(new Error(r.status + ''));
+          const ids = (j.data || j.models || []).map(m => (typeof m === 'string' ? m : m.id || m.name || '')).filter(Boolean)
+            // 翻訳に使えないもの（画像・音声・埋め込みなど）は出さない
+            .filter(n => !/embed|tts|whisper|dall-e|image|audio|realtime|moderation|transcribe|speech|rerank|ocr|parse|vision-exp/i.test(n));
+          res(claude ? ids : ids.sort().reverse());
         } catch (e) { rej(e); }
       },
       onerror: () => rej(new Error('通信エラー')), ontimeout: () => rej(new Error('タイムアウト')),
@@ -3807,7 +3830,7 @@ ${body}</main></body></html>`;
       try { setMode(typeof tab === 'string' ? tab : GM_getValue(wtKey(), false) ? 'wt' : 'novel'); } catch { setMode('novel'); } // 今のモードのタブで開く（閉じてもモードが勝手に変わらない）
     }
 
-    // モデル一覧：Geminiはキーがあれば実際に使えるものを取得、なければ既定の候補
+    // モデル一覧：キーがあれば実際に使えるものを取得（Gemini・Claude・OpenAI互換・Solar）、なければ既定の候補
     async function fillModels() {
       const sel = f('modelPick'), prov = f('provider').value, key = f('key').value.trim();
       const put = (list, note) => {
@@ -3815,9 +3838,11 @@ ${body}</main></body></html>`;
       };
       const base = [...new Set([MODELS[prov], ...(FALLBACKS[prov] || '').split(/[,\s]+/), ...(CANDIDATES[prov] || [])].filter(Boolean))];
       put(base, '（選ぶとモデル名に入ります）');
-      if (prov !== 'gemini' || !key) return;
-      try { const list = await listGeminiModels(key); if (f('provider').value === 'gemini') put(list, '（選ぶとモデル名に入ります・取得済み）'); }
-      catch { /* 取得できなければ既定の候補のまま */ }
+      if (!key || prov === 'plamo') return;
+      try {
+        const list = prov === 'gemini' ? await listGeminiModels(key) : await listOtherModels(prov, key, f('baseUrl').value);
+        if (list.length && f('provider').value === prov) put(list, '（選ぶとモデル名に入ります・取得済み）');
+      } catch { /* 取得できなければ既定の候補のまま */ }
     }
     f('importFile').addEventListener('change', async e => {
       const inp = e.currentTarget || e.target;
@@ -3827,6 +3852,7 @@ ${body}</main></body></html>`;
     });
     f('modelPick').addEventListener('change', e => { if (e.target.value) f('model').value = e.target.value; });
     f('key').addEventListener('change', fillModels);
+    f('baseUrl').addEventListener('change', fillModels);
     f('provider').addEventListener('change', () => {
       stash();
       curProv = f('provider').value;
