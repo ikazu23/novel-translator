@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.8
+// @version      10.6.9
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -775,7 +775,19 @@ Rules:
     const el = document.querySelector('[data-kztl-body]');
     return el && koNodes(el) > 0 ? el : null;
   };
+  // おすすめ作品の一覧（「作品名／作者／(2,537)」の並び）っぽいか。本文が読み込まれる前に、これを本文と間違えないように
+  function looksLikeList(el) {
+    try {
+      const lines = String(el.innerText || el.textContent || '').split('\n').map(s => s.trim()).filter(Boolean);
+      if (lines.length < 4) return false;
+      const num = lines.filter(s => /^\(\s*[\d,]+\s*\)$/.test(s)).length;
+      return num >= 2 && num >= lines.length * 0.12;
+    } catch { return false; }
+  }
   function findBodies() {
+    return findBodiesRaw().filter(el => !looksLikeList(el));
+  }
+  function findBodiesRaw() {
     const mb = markedBody();
     if (mb) return mark().kztlEp ? [mb] : []; // 目印のあるアプリで話をひらいていないとき（本棚・目次）は訳さない
     const sb = siteBody();
@@ -801,6 +813,10 @@ Rules:
   }
 
   function findBody() {
+    const el = findBodyRaw();
+    return el && looksLikeList(el) ? null : el;
+  }
+  function findBodyRaw() {
     const mb = markedBody();
     if (mb) return mark().kztlEp ? mb : null;
     const sb = siteBody();
@@ -3117,6 +3133,21 @@ ${body}</main></body></html>`;
   const epKey = () => 'ep:' + workKey() + '|' + pageId() + '@' + prov() + (OUT_X ? '#' + OUT_LANG : '');
   const epNum = t => { const m = String(t || '').match(/(\d+)\s*(?:화|話|회|回)/) || String(t || '').match(/(\d+)(?!.*\d)/); return m ? +m[1] : null; };
   let snapTimer = 0;
+  // 本文の段落の6割以上が訳されていない（原文のまま）なら「ほとんど訳されていない」
+  // ページの言語には頼らず、訳文（日本語）そのものを見る：ハングルが残る／かなが無く漢字だけ（中国語）／かな・漢字が無く英字だけ（英語）
+  const notJa = s => {
+    const t = String(s || '');
+    if ((t.match(/[가-힣]/g) || []).length >= 2) return true;
+    if (/[぀-ヿ]/.test(t)) return false;
+    if ((t.match(/[一-鿿]/g) || []).length >= 4) return true;
+    return !/[一-鿿]/.test(t) && (t.match(/[A-Za-z]/g) || []).length >= 10;
+  };
+  function mostlyUntranslated(data) {
+    if (OUT_X) return false; // 英語・中国語に訳す版は対象外
+    const items = ((data && data.paras) || []).filter(x => x && !x.blank && !x.ilNote && x.text && x.text !== SCENE_MARK);
+    if (!items.length) return false;
+    return items.filter(x => notJa(x.text)).length >= items.length * 0.6;
+  }
   const snapLater = () => { clearTimeout(snapTimer); snapTimer = setTimeout(snapshotEp, 800); };
   function snapshotEp() {
     try {
@@ -3125,6 +3156,7 @@ ${body}</main></body></html>`;
       if (live) data = liveBuild()?.data || null;
       else if (copyCtx && copyCtx.href === pageId() && inPlaceOn) data = episodeData(copyCtx);
       if (!data || !data.paras || !data.paras.length) return;
+      if (mostlyUntranslated(data)) return;
       const k = epKey(), old = GM_getValue(k, null);
       // 本文の文だけを数える（空行・「挿絵あり」の印・場面の区切り「◇　◇　◇」は数えない）
       const count = d => ((d && d.paras) || []).filter(x => x && !x.blank && !x.ilNote && x.text !== SCENE_MARK && !/^【挿絵あり[^】]*】$/.test(String(x.text || ''))).length;
@@ -4393,6 +4425,7 @@ ${body}</main></body></html>`;
         const v = GM_getValue(k, null);
         if (!v || !v.data || !Array.isArray(v.data.paras) || !v.wk) continue;
         if (/ikazu23\.github\.io/.test(String(v.data.source || '') + k)) continue; // イカ墨ノベルの中で訳した話は送り返さない
+        if (mostlyUntranslated(v.data)) continue; // おすすめ一覧などを間違えて控えた話は送らない
         const page = k.slice(3).replace(/@[^@]*$/, '');
         const o = best.get(page);
         if (!o || (v.at || 0) > (o.at || 0)) best.set(page, Object.assign({ page }, v));
