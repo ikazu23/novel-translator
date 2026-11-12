@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.10
+// @version      10.6.11
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -1476,7 +1476,7 @@ Rules:
     if (sn) user += `【訳し方（必ず従う）】\n${sn}\n\n`;
     if (c.glossary.trim()) user += `【用語集（原語=訳語）】\n${c.glossary.trim()}\n\n`;
     const sheet = getSheet();
-    if (sheet) user += `【この作品の人物・用語メモ（訳語・一人称・呼び方はこれに合わせる。ただし敬語かタメ口かは、メモではなく毎回原文の言い方に合わせる。例：韓国語の요・습니다体は丁寧語、반말はタメ口）】\n${sheet}\n\n`;
+    if (sheet) user += `【この作品の人物・用語メモ（訳語・一人称・呼び方はこれに合わせる。ただし敬語かタメ口かは、メモではなく毎回原文の言い方に合わせる。例：韓国語の습니다体は丁寧語。요で終わる해요体も丁寧語なので、柔らかめの「です・ます」（〜ですよ、〜ますね）にして「〜だよ」「〜じゃん」にはしない。반말はタメ口）】\n${sheet}\n\n`;
     const tail = prevTail();
     if (tail) user += `【この作品の前に読んだ話の最後の訳文（話の続きとして、文体・呼称・一人称をそろえる。ここは訳さない）】\n${tail}\n\n`;
     if (whole) user += `【この話の原文全体（文脈把握用。ここは訳さない）】\n${whole}\n\n`;
