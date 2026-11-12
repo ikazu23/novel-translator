@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.11
+// @version      10.6.12
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -684,7 +684,7 @@ Rules:
 - 段落構成を保つ。入力と同じ段落数で出力し、段落の間は空行1つ。
 - 直訳ではなく、日本の小説として自然な文体にする。語順・主語の省略・語尾は日本語として自然に整える。
 - 会話文は人物の性格・関係性に合った口語にする。
-- 与えられた文脈（話全体の原文、直前の訳文）を踏まえ、呼称・一人称・口調・代名詞を一貫させる。
+${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモではなく、セリフごとに原文の文末で決める。-습니다／-ㅂ니다／-습니까・-요・-죠／-지요・-네요・-군요・-거든요・-ㄹ게요・-세요・-ㄹ까요・-는데요・-잖아요で終わるセリフは丁寧語（です・ます）、-아／-어・-야・-지・-냐・-니・-자・-거든・-잖아で終わるセリフはタメ口にする。해요体（요で終わる）は柔らかめの「です・ます」（〜ですよ、〜ますね）にして、「〜だよ」「〜じゃん」にしない。同じ人物でも、相手や場面で切り替わるのは原文どおりにする。\n' : ''}- 与えられた文脈（話全体の原文、直前の訳文）を踏まえ、呼称・一人称・口調・代名詞を一貫させる。
 - 用語集・作品メモがある場合、その訳語に必ず従う。
 - ${l.names}
 - 出力は訳文のみ。前置き、注釈、見出しは一切付けない。
@@ -1253,6 +1253,16 @@ Rules:
         const e = new Error('BLOCKED: ' + j.finish); e.partial = best.text; throw e;
       }
       if (!j.text.trim() && j.finish && j.finish !== 'STOP') throw new Error('BLOCKED: ' + j.finish);
+      if (!OUT_X && curLang() === 'ko') {
+        const fixCall = (s, u) => req(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+          { 'x-goog-api-key': key }, {
+            systemInstruction: { parts: [{ text: s }] },
+            contents: [{ role: 'user', parts: [{ text: u }] }],
+            generationConfig: { ...gc, temperature: 0.2 },
+            safetySettings,
+          }, { parse: parseGemini });
+        return politeRepair(msg, j.text, fixCall);
+      }
       return j.text;
     }
     if (c.provider === 'claude') {
@@ -1316,6 +1326,69 @@ Rules:
       }
       if (!changed) return text;
       return [...tr].map(([n, s]) => `[[${n}]] ${s}`).join('\n\n');
+    } catch { return text; } // 直しに失敗しても、最初の訳はそのまま使う
+  }
+
+  // ---------- 해요体（요で終わるセリフ）がタメ口に訳されたときの直し（Gemini用・1回だけ） ----------
+  const HANGUL_RE = /[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]/;
+  // 段落の中の最後のセリフ（かっこの中身）
+  const lastQuote = (s, re) => { const m = [...String(s).matchAll(re)]; return m.length ? m[m.length - 1][1].trim() : ''; };
+  const SRC_Q = /[“"「『]([^“”"「」『』]+)[”"」』]/g;
+  const TR_Q = /[「『“"]([^「」『』“”"]+)[」』”"]/g;
+  // 原文のセリフが요・죠で終わる丁寧語か（短い返事の 아니요・네요 や、필요 のような名詞は除く）
+  function srcYo(s) {
+    const q = lastQuote(stripTags(s), SRC_Q);
+    if ((q.match(/[\uAC00-\uD7A3]/g) || []).length < 6) return false;
+    // 「앉아 봐요, 우리.」のような倒置（最後に短い言葉が付く）は、その言葉を外して見る
+    const e = q.replace(/[\s.,!?…~～·・'"’”)\]-]+$/, '').replace(/,\s*[\uAC00-\uD7A3\s]{1,6}$/, '').replace(/[\s.,!?…~～·・'"’”)\]-]+$/, '');
+    if (/(필요|불필요|중요|주요|수요|강요|소요|요요)$/.test(e)) return false;
+    return /(요|죠)$/.test(e);
+  }
+  // 訳のセリフが丁寧語で終わっているか
+  const POLITE_END = /(です|ます|ません|でした|ました|でしょう|ましょう|ください|下さい|ございます|ございません)(か|かね|よ|ね|よね|わ|わね|けど|けれど|が|から|ので|し|って)?$/;
+  function trPolite(s) {
+    const q = lastQuote(stripTags(s), TR_Q);
+    if (!q) return null; // セリフが見つからない
+    const e = q.replace(/[\s。、.,!?！？…‥ー〜～―—)）]+$/, '').replace(/[、,]\s*[^、,。！？!?]{1,6}$/, '').replace(/[\s。、.,!?！？…‥ー〜～―—)）]+$/, '');
+    return POLITE_END.test(e);
+  }
+  async function politeRepair(msg, text, fixCall) {
+    try {
+      const body = String(msg).split('【今回訳す部分】\n').pop();
+      if (!text) return text;
+      const numbered = /\[\[\d+\]\]/.test(body);
+      let src, tr;
+      if (numbered) {
+        src = new Map([...body.matchAll(/\[\[(\d+)\]\]\s*([\s\S]*?)(?=\s*\[\[\d+\]\]|$)/g)].map(m => [+m[1], m[2].split(/\n\s*\n/)[0].trim()]));
+        tr = parseNum(text);
+      } else {
+        // 番号なし（別画面で読む）：段落の数が同じときだけ、順番で原文と訳を組にする
+        const sp = body.split(/\n\s*\n/).map(x => x.trim()).filter(Boolean);
+        const tp = String(text).split(/\n\s*\n/).map(x => x.trim()).filter(Boolean);
+        if (!sp.length || sp.length !== tp.length) return text;
+        src = new Map(sp.map((x, i) => [i + 1, x]));
+        tr = new Map(tp.map((x, i) => [i + 1, x]));
+      }
+      const bad = [...tr].filter(([n, s]) => src.has(n) && srcYo(src.get(n)) && trPolite(s) === false).slice(0, 30);
+      if (!bad.length) return text;
+      const sys = '韓国語の小説を日本語に訳した文の、仕上げの直しをします。各段落のセリフは、原文では요・죠で終わる丁寧語（해요体）なのに、訳ではタメ口になっています。'
+        + '意味と口調の雰囲気は変えずに、セリフの文末だけを柔らかめの丁寧語（です・ます。〜ですよ、〜ますね など）に直してください。地の文やほかの部分は変えないこと。'
+        + '返すのは直した訳だけで、「[[番号]] 直した訳」の形で、受け取った番号すべてについて返すこと。';
+      const user = bad.map(([n, s]) => `[[${n}]]\n原文：${src.get(n)}\n訳：${s}`).join('\n\n');
+      const j = await fixCall(sys, user);
+      if (!j || j.err || j.block) return text;
+      const fix = parseNum(j.text || '');
+      let changed = false;
+      for (const [n, s] of bad) {
+        const v = fix.get(n);
+        if (!v || HANGUL_RE.test(stripTags(v))) continue;
+        const a = stripTags(s).length, b = stripTags(v).length;
+        if (b < a * 0.5 || b > a * 2) continue; // 長さが大きく変わった直しは使わない
+        if (trPolite(v) !== true) continue; // 丁寧語になっていなければ使わない
+        tr.set(n, v); changed = true;
+      }
+      if (!changed) return text;
+      return numbered ? [...tr].map(([n, s]) => `[[${n}]] ${s}`).join('\n\n') : [...tr.values()].join('\n\n');
     } catch { return text; } // 直しに失敗しても、最初の訳はそのまま使う
   }
 
@@ -1458,6 +1531,7 @@ Rules:
       + `Only characters and recurring proper nouns, up to 50 lines. Keep existing entries unless they conflict. Output only the notes.` : `【現在のメモ】\n${old || '（なし）'}\n\n【今回の話の原文】\n${src.slice(0, 30000)}\n\n【今回の訳文】\n${trText.slice(0, 30000)}\n\n`
       + `今回の訳文で実際に使われた訳し方に合わせて、メモを更新した全文を出力してください。\n`
       + `人物は1行に「原語=訳語｜性別｜一人称｜話し方・呼び方・関係」、用語は「原語=訳語｜用語｜短い説明」。\n`
+      + `話し方は「タメ口」「敬語」と決めつけず、相手ごとに書く（例：ユハンには敬語、弟にはタメ口）。誰に対しても同じときだけ1語でよい。\n`
       + `登場人物と繰り返し出る固有名詞だけ、最大50行。既存の項目は矛盾がない限り変えない。メモ本文のみ出力。`;
     try {
       const sm = c.sheetModel.trim() || SHEET_MODELS[c.provider];
@@ -1482,6 +1556,8 @@ Rules:
     if (whole) user += `【この話の原文全体（文脈把握用。ここは訳さない）】\n${whole}\n\n`;
     let msg = '';
     if (ref) msg += `【${refLabel}（文体・呼称・一人称を合わせる）】\n${ref.slice(-1500)}\n\n`;
+    // 口調の念押し（訳す文のすぐ前に置くと守られやすい。ctx側に入れないのはキャッシュを壊さないため）
+    if (!OUT_X && curLang() === 'ko') msg += '【口調の確認】セリフの敬語・タメ口は、メモではなく原文の文末で決める。요・죠・습니다で終わるセリフは「です・ます」（요は柔らかめ：〜ですよ、〜ますね）。반말（-아/-어・-야・-지・-냐・-자）はタメ口。\n\n';
     msg += `【今回訳す部分】\n${body}`;
     return { ctx: user, msg, ref: ref ? String(ref).slice(-1500) : '' };
   }
