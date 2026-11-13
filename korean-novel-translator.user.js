@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.14
+// @version      10.6.16
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -1209,7 +1209,7 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
     return show();
   }
 
-  const THINK_LEVELS = ['minimal', 'low', 'medium', 'high'];
+  const THINK_LEVELS = ['low', 'medium', 'high', 'xhigh'];
   // 「モデル|考える量」→ 実際に使えた考える量（空＝指定なし）。ページを開き直しても覚えておく
   const thinkFix = new Map(Object.entries((() => { try { return GM_getValue('thinkFix', {}) || {}; } catch { return {}; } })()));
   async function llm(c, system, user, modelOverride, onText) {
@@ -1224,8 +1224,10 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
       const want = THINK_LEVELS.includes(c.think) ? c.think : '';
       if (want && !/gemini-[12]\./.test(model)) gc.thinkingConfig = { thinkingLevel: want }; // 設定で選んだ考える量（2系以前は対象外）
       else if (/gemini-2\.5-flash(?!-lite)/.test(model)) gc.thinkingConfig = { thinkingBudget: 0 };
-      // 3系以降：Flash・4系は最小（minimal）、Proは最小がlow。最小が使えないモデルは自動でlowに下げる
-      else if (/gemini-([3-9]|\d\d)/.test(model)) gc.thinkingConfig = { thinkingLevel: /pro/.test(model) ? 'low' : 'minimal' };
+      // 4系以降：最小（minimal）が無いので低（low）
+      else if (/gemini-([4-9]|\d\d)/.test(model)) gc.thinkingConfig = { thinkingLevel: 'low' };
+      // 3系：Flashは最小（minimal）、Proは最小がlow
+      else if (/gemini-3/.test(model)) gc.thinkingConfig = { thinkingLevel: /pro/.test(model) ? 'low' : 'minimal' };
       // 前に「その考える量は使えない」と言われたモデルは、最初から使える量で送る（毎回エラーからやり直さない）
       const tk = model + '|' + (gc.thinkingConfig?.thinkingLevel || '');
       if (thinkFix.has(tk)) { const v = thinkFix.get(tk); if (v) gc.thinkingConfig = { thinkingLevel: v }; else delete gc.thinkingConfig; }
@@ -1244,8 +1246,9 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
       try { j = await call(); }
       catch (e) {
         if (!(/^400/.test(e.message) && /think/i.test(e.message)) || !gc.thinkingConfig) throw e;
-        // minimalが使えないモデルならlowで再送（次からは最初からlowで送る）
+        // 使えない考える量なら、近い量で再送（次からは最初からその量で送る）：minimal→low、xhigh→high、それ以外は指定なし
         if (gc.thinkingConfig.thinkingLevel === 'minimal') gc.thinkingConfig = { thinkingLevel: 'low' };
+        else if (gc.thinkingConfig.thinkingLevel === 'xhigh') gc.thinkingConfig = { thinkingLevel: 'high' };
         else delete gc.thinkingConfig;
         thinkFix.set(tk, gc.thinkingConfig?.thinkingLevel || '');
         try { GM_setValue('thinkFix', Object.fromEntries(thinkFix)); } catch { /* 覚えられなくても動く */ }
@@ -3843,7 +3846,7 @@ ${body}</main></body></html>`;
           <label><span class="sheet-title">この作品のメモ</span>（自動更新・手で直してもOK。作品のページで開いたときに表示） <textarea name="sheet"></textarea></label>
           <label>追加の指示（1行に1つ。作品ごとに書き分けてOK） <textarea name="instructions" placeholder="例：『作品名』主人公ソン・ユハン（男）の一人称は地の文・台詞とも「俺」"></textarea></label>
           <label>訳し方（新しく訳す話から） <select name="style"><option value="read">読みやすさ寄り（今まで通り）</option><option value="bal">バランス（付け足しを控える）</option><option value="faith">忠実寄り（原文の言い回しどおり）</option></select></label>
-          <label>考える量（Geminiのみ。多いほど遅く高くなる） <select name="think"><option value="">おまかせ（最小。使えないモデルは自動で低）</option><option value="minimal">最小</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+          <label>考える量（Geminiのみ。多いほど遅く高くなる） <select name="think"><option value="">最小（4系は低）</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">特高（使えないモデルは高）</option></select></label>
           <div class="row"><button data-a="save" class="primary">保存</button><button data-a="cancel">戻る</button></div>
           <div class="sec">記録の引っ越し・バックアップ</div>
           <label>訳の記録（ほかの端末へ移すとき。APIキーは含まれません）</label>
