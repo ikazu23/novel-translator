@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.12
+// @version      10.6.14
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -632,7 +632,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
   // 作品メモの更新に使う安いモデル（空欄なら翻訳と同じモデル）
   const SHEET_MODELS = { claude: 'claude-haiku-4-5-20251001', gemini: '', openai: '', plamo: '', solar: '' };
   const DEF = {
-    mode: 'inplace', style: 'read', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
+    mode: 'inplace', style: 'read', think: '', provider: 'gemini', key: '', model: '', baseUrl: 'https://api.deepseek.com', chunk: 4000, instructions: '', fallback: '', parallel: 2, adult: true, autoSheet: true, quickStart: true,
     glossary: '', bili: false,
   };
   // APIキー・モデル・予備モデルはエンジンごとに別々に保存（切り替えても入れ直さなくていい）
@@ -1209,6 +1209,9 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
     return show();
   }
 
+  const THINK_LEVELS = ['minimal', 'low', 'medium', 'high'];
+  // 「モデル|考える量」→ 実際に使えた考える量（空＝指定なし）。ページを開き直しても覚えておく
+  const thinkFix = new Map(Object.entries((() => { try { return GM_getValue('thinkFix', {}) || {}; } catch { return {}; } })()));
   async function llm(c, system, user, modelOverride, onText) {
     const model = modelOverride || c.model.trim() || MODELS[c.provider];
     const ctx = user && typeof user === 'object' ? user.ctx : '';
@@ -1218,9 +1221,14 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
     if (c.provider === 'gemini') {
       // 翻訳に「考える時間」は不要なので思考をオフ／最小にして高速化
       const gc = { temperature: styleOf(c).temp ?? 0.8, maxOutputTokens: 32768 };
-      if (/gemini-2\.5-flash(?!-lite)/.test(model)) gc.thinkingConfig = { thinkingBudget: 0 };
-      // 3系：Flashは最小（minimal）、Proは最小がlow
-      else if (/gemini-3/.test(model)) gc.thinkingConfig = { thinkingLevel: /pro/.test(model) ? 'low' : 'minimal' };
+      const want = THINK_LEVELS.includes(c.think) ? c.think : '';
+      if (want && !/gemini-[12]\./.test(model)) gc.thinkingConfig = { thinkingLevel: want }; // 設定で選んだ考える量（2系以前は対象外）
+      else if (/gemini-2\.5-flash(?!-lite)/.test(model)) gc.thinkingConfig = { thinkingBudget: 0 };
+      // 3系以降：Flash・4系は最小（minimal）、Proは最小がlow。最小が使えないモデルは自動でlowに下げる
+      else if (/gemini-([3-9]|\d\d)/.test(model)) gc.thinkingConfig = { thinkingLevel: /pro/.test(model) ? 'low' : 'minimal' };
+      // 前に「その考える量は使えない」と言われたモデルは、最初から使える量で送る（毎回エラーからやり直さない）
+      const tk = model + '|' + (gc.thinkingConfig?.thinkingLevel || '');
+      if (thinkFix.has(tk)) { const v = thinkFix.get(tk); if (v) gc.thinkingConfig = { thinkingLevel: v }; else delete gc.thinkingConfig; }
       // 小説の翻訳なので、成人向け表現のブロックを外せるようにする（未成年に関わる内容などはGoogle側で常にブロック）
       const safetySettings = c.adult ? ['HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_HATE_SPEECH',
         'HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_DANGEROUS_CONTENT'].map(category => ({ category, threshold: 'BLOCK_NONE' })) : undefined;
@@ -1236,9 +1244,11 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
       try { j = await call(); }
       catch (e) {
         if (!(/^400/.test(e.message) && /think/i.test(e.message)) || !gc.thinkingConfig) throw e;
-        // minimalが使えないモデルならlowで再送
+        // minimalが使えないモデルならlowで再送（次からは最初からlowで送る）
         if (gc.thinkingConfig.thinkingLevel === 'minimal') gc.thinkingConfig = { thinkingLevel: 'low' };
         else delete gc.thinkingConfig;
+        thinkFix.set(tk, gc.thinkingConfig?.thinkingLevel || '');
+        try { GM_setValue('thinkFix', Object.fromEntries(thinkFix)); } catch { /* 覚えられなくても動く */ }
         j = await call();
       }
       if (j.err) throw new Error((j.err.code || 500) + ': ' + (j.err.message || 'error'));
@@ -3833,6 +3843,7 @@ ${body}</main></body></html>`;
           <label><span class="sheet-title">この作品のメモ</span>（自動更新・手で直してもOK。作品のページで開いたときに表示） <textarea name="sheet"></textarea></label>
           <label>追加の指示（1行に1つ。作品ごとに書き分けてOK） <textarea name="instructions" placeholder="例：『作品名』主人公ソン・ユハン（男）の一人称は地の文・台詞とも「俺」"></textarea></label>
           <label>訳し方（新しく訳す話から） <select name="style"><option value="read">読みやすさ寄り（今まで通り）</option><option value="bal">バランス（付け足しを控える）</option><option value="faith">忠実寄り（原文の言い回しどおり）</option></select></label>
+          <label>考える量（Geminiのみ。多いほど遅く高くなる） <select name="think"><option value="">おまかせ（最小。使えないモデルは自動で低）</option><option value="minimal">最小</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
           <div class="row"><button data-a="save" class="primary">保存</button><button data-a="cancel">戻る</button></div>
           <div class="sec">記録の引っ越し・バックアップ</div>
           <label>訳の記録（ほかの端末へ移すとき。APIキーは含まれません）</label>
@@ -3943,6 +3954,7 @@ ${body}</main></body></html>`;
       f('adult').checked = !!c.adult;
       f('plamoUrl').value = c.plamoUrl || '';
       f('style').value = STYLES[c.style] ? c.style : 'read';
+      f('think').value = THINK_LEVELS.includes(c.think) ? c.think : '';
       f('imgChar').value = c.imgChar || '';
       f('jaFont').checked = c.jaFont !== false;
       f('bili').checked = !!c.bili;
@@ -4169,7 +4181,7 @@ ${body}</main></body></html>`;
           keys: draft.keys, models: draft.models, fallbacks: draft.fallbacks, sheetModels: draft.sheetModels,
           baseUrl: f('baseUrl').value.trim(), plamoUrl: f('plamoUrl').value.trim(), chunk: Math.max(1000, +f('chunk').value || DEF.chunk),
           parallel: Math.min(6, Math.max(1, +f('parallel').value || DEF.parallel)),
-          glossary: f('glossary').value, instructions: f('instructions').value, style: STYLES[f('style').value] ? f('style').value : 'read', adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, bili: f('bili').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
+          glossary: f('glossary').value, instructions: f('instructions').value, style: STYLES[f('style').value] ? f('style').value : 'read', think: THINK_LEVELS.includes(f('think').value) ? f('think').value : '', adult: f('adult').checked, imgChar: f('imgChar').value.trim(), jaFont: f('jaFont').checked, bili: f('bili').checked, illust: f('illust').checked, autoMode: f('autoMode').checked, outLang: f('outLang').value, autoSheet: f('autoSheet').checked, quickStart: f('quickStart').checked,
         });
         resetLang();
         if (illustOn() && !wtApi && window.top === window.self) { startWT(false); setTimeout(check, 0); } else if (wtApi) wtApi.setOn();
