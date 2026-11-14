@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.16
+// @version      10.6.17
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -136,6 +136,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     'この話をHTMLファイルで保存しました（ダウンロードを確認してください）': 'Saved this chapter as an HTML file (check your downloads)',
     '本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」を使ってください': 'Text not found. Use "Pick the text area manually" in the extension menu',
     '本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」か「診断」を使ってください': 'Text not found. Use "Pick the text area manually" or "Diagnose" in the extension menu',
+    'Postypeの自動翻訳（日本語）が表示されています。ページの「原文を見る」で韓国語に切り替えてから「訳」を押してください': 'Postype is showing its own machine translation. Switch the page to the original (Korean) text, then press the button again',
     'APIキーを設定してください': 'Please set your API key', '原文に戻しました': 'Back to the original', '今の画面に訳せる文が見つかりません': 'No text to translate on this screen',
     'まだ訳した文がありません': 'Nothing translated yet', 'この作品の控えがまだありません。訳した話を一度開いて「訳」を押すと控えられます': 'No saved chapters for this work yet. Open a translated chapter and press TL to save it',
     '作品を選ぶと、訳した話をまとめてZIPで保存します': 'Pick a work to save its translated chapters as a ZIP', 'まだ控えた話がありません': 'No saved chapters yet',
@@ -315,6 +316,7 @@ const KZ_ALERT = (m) => window.alert(m), KZ_CONFIRM = (m) => window.confirm(m);
     "この話をHTMLファイルで保存しました（ダウンロードを確認してください）": "已将本章保存为HTML文件（请查看下载）",
     "本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」を使ってください": "找不到正文。请使用扩展菜单中的“手动选择正文区域”",
     "本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」か「診断」を使ってください": "找不到正文。请使用扩展菜单中的“手动选择正文区域”或“诊断”",
+    "Postypeの自動翻訳（日本語）が表示されています。ページの「原文を見る」で韓国語に切り替えてから「訳」を押してください": "Postype 正在显示自动翻译。请先切换到原文（韩语），再按按钮",
     "APIキーを設定してください": "请设置API密钥",
     "原文に戻しました": "已恢复原文",
     "今の画面に訳せる文が見つかりません": "当前画面没有可翻译的文字",
@@ -1580,7 +1582,18 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
   const SITE_BODY = [
     [/(^|\.)jjwxc\.(net|com)$/, 'div.noveltext, #novelbody, .noveltext, #content'],
     [/(^|\.)(archiveofourown\.org|ao3\.org)$/, '#workskin, #chapters'], // AO3：題名・あらすじ・前書き・本文・後書き
+    [/(^|\.)postype\.com$/, '#post-content, .post-content'], // Postype：投稿の本文（おすすめ投稿やコメントは入れない）
   ];
+  const isPostype = () => /(^|\.)postype\.com$/.test(location.hostname);
+  // Postypeの自動翻訳（日本語）が表示されているか：本文にハングルがほとんどなく、かなが多い
+  function postypeShowsJa() {
+    try {
+      const pc = isPostype() && document.querySelector('#post-content, .post-content');
+      if (!pc) return false;
+      const s = pc.textContent || '';
+      return (s.match(/[\uAC00-\uD7A3]/g) || []).length < 20 && (s.match(/[\u3040-\u30FF]/g) || []).length > 50;
+    } catch { return false; }
+  }
   const siteBody = () => {
     for (const [re, sel] of SITE_BODY) if (re.test(location.host)) { const el = document.querySelector(sel); if (el) return el; }
     return null;
@@ -3368,6 +3381,7 @@ ${body}</main></body></html>`;
     if (inPlaceOn && live && !force) return restore();
     if (inPlaceOn && (!live || force)) restore();
 
+    if (postypeShowsJa()) return ui.toast('Postypeの自動翻訳（日本語）が表示されています。ページの「原文を見る」で韓国語に切り替えてから「訳」を押してください', 8000);
     const roots = findBodies();
     if (!roots.length) return ui.toast('本文が見つかりません。拡張メニューの「本文エリアを手動で選ぶ」か「診断」を使ってください');
     await prepBodies(cfg(), roots);
@@ -4663,6 +4677,17 @@ ${body}</main></body></html>`;
     const h = location.hostname;
     if (/(^|\.)comic\.naver\.com$/.test(h)) return 'wt';
     if (/jjwxc|archiveofourown/.test(h)) return 'novel';
+    // Postype：トップや一覧は表紙の画像が多いので切り替えない。投稿のページだけ、本文の中身で決める
+    if (/(^|\.)postype\.com$/.test(h)) {
+      const pc = /\/post\//.test(location.pathname) && document.querySelector('#post-content, .post-content');
+      if (!pc) return null;
+      const n = (pc.textContent || '').replace(/\s+/g, '').length;
+      let pics = 0;
+      for (const im of pc.querySelectorAll('img,canvas')) { const b = im.getBoundingClientRect(); if (b.width >= Math.min(300, innerWidth * 0.6) && b.height >= 200) pics++; }
+      if (n >= 300) return 'novel';
+      if (pics >= 3) return 'wt';
+      return null;
+    }
     let txt = 0, big = 0, wide = 0;
     // Ridi・カカオページ：表紙やバナーを漫画と間違えないよう、画面幅いっぱいに近い画像だけ数える（スマホは画面が狭いので特に）
     const readerSite = /ridibooks|page\.kakao/.test(h);
