@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.17
+// @version      10.6.18
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -3251,7 +3251,45 @@ ${body}</main></body></html>`;
     return items.filter(x => notJa(x.text)).length >= items.length * 0.6;
   }
   const snapLater = () => { clearTimeout(snapTimer); snapTimer = setTimeout(snapshotEp, 800); };
+  // ---------- イカ墨ノベルの中で訳したとき：どの話のどの段落に、どんな訳を表示しているかをイカ墨ノベルに知らせる ----------
+  // イカ墨ノベルが「訳だけの本を作る／原文の下の訳に入れる」を選べるように。訳はイカ墨ノベルの段落（data-pi・data-qi）ごとに渡す。
+  // 本棚に送る「send」とは別の知らせ（inapp）なので、訳した話がまた送られてくる、のくり返しにはならない。
+  // 古いイカ墨ノベルは inapp を知らないので、何も起きない（今まで通り）
+  let inAppLast = '';
+  function inAppReport() {
+    if (OUT_X || location.host !== 'ikazu23.github.io' || window.top !== window.self) return;
+    const d = mark();
+    if (!d.kztlWork || !d.kztlEp) return;
+    const body = document.querySelector('[data-kztl-body]');
+    if (!body) return;
+    const els = new Set(shownTranslated());
+    for (const el of applied.keys()) if (el.isConnected && el.hasAttribute('data-kztl-tr')) els.add(el);
+    const ps = new Set();
+    for (const el of els) {
+      if (!el || !el.closest) continue;
+      const p = el.closest('[data-qi][data-pi]');
+      if (p && body.contains(p)) { ps.add(p); continue; }
+      if (el.querySelectorAll) el.querySelectorAll('[data-qi][data-pi]').forEach(q => { if (body.contains(q)) ps.add(q); });
+    }
+    const items = [];
+    for (const p of ps) {
+      if (p.dataset.type && p.dataset.type !== 'text') continue;
+      const c = p.cloneNode(true);
+      c.querySelectorAll('.ko-tr, rt, rp, script, style, textarea, button').forEach(x => x.remove());
+      [c, ...c.querySelectorAll('*')].forEach(x => { for (const a of [...x.attributes]) if (/^(data-|on|class$|id$|contenteditable$|lang$)/i.test(a.name)) x.removeAttribute(a.name); });
+      const text = noWm(c.textContent).replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      items.push({ pi: +p.dataset.pi, qi: +p.dataset.qi, text, html: noWm(c.innerHTML) });
+    }
+    if (!items.length) return;
+    const msg = { type: 'inapp', v: 1, nid: d.kztlWork, eid: d.kztlEp, eng: provName(), items };
+    const sig = hash(JSON.stringify(msg));
+    if (sig === inAppLast) return; // 同じ内容は1回だけ
+    inAppLast = sig;
+    try { (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).postMessage('kztlNovel:' + JSON.stringify(msg), location.origin); } catch { /* 渡せない */ }
+  }
   function snapshotEp() {
+    try { inAppReport(); } catch { /* 知らせられなくても、ほかはいつも通り */ }
     try {
       let data = null;
       const live = !!(liveData && liveData.key === liveKey());
