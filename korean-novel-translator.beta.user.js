@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.18
+// @version      10.6.20
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -1517,8 +1517,20 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
   function saveParas(srcs, tr) {
     const m = getParaMap();
     let n = 0;
-    srcs.forEach((src, i) => { if (tr[i] != null && !needsFix(tr[i], src) && m[src] !== tr[i]) { m[src] = tr[i]; n++; } });
-    if (n) GM_setValue(paraKey(), m);
+    const changed = [];
+    srcs.forEach((src, i) => { if (tr[i] != null && !needsFix(tr[i], src) && m[src] !== tr[i]) { m[src] = tr[i]; n++; changed.push(src); } });
+    if (n) {
+      GM_setValue(paraKey(), m);
+      // イカ墨ノベルの原文の下に入れる訳：前に渡した作品なら、増えた・訳し直した原文を覚えておき、次はそこだけ渡す
+      try {
+        const pk = paraKey();
+        if (GM_getValue('trsent:' + pk, false)) {
+          const d = GM_getValue('trdirty:' + pk, {}) || {};
+          changed.forEach(src => { d[src] = 1; });
+          GM_setValue('trdirty:' + pk, d);
+        }
+      } catch { /* 覚えられなくても訳の保存は済んでいる */ }
+    }
   }
 
   function prevTail() {
@@ -4590,11 +4602,70 @@ ${body}</main></body></html>`;
       if (eps.length) { post({ type: 'send', eps }); try { ui.toast(`イカ墨翻訳：${eps.length}話を送りました`, 3000); } catch (e) { /* 表示できない */ } }
       else if (!best.size && !sendAll.told) { sendAll.told = true; try { ui.toast('イカ墨翻訳：この端末で訳した話の控えがまだありません（訳した話を開いて「訳」を押すと控えられます）', 5000); } catch (e) { /* 表示できない */ } }
     };
+    // ---------- 原文の下に入れる訳（イカ墨原文から入れた原文の本へ） ----------
+    // イカ墨ノベル（新しい版）は hello に trWant: { pages: [原文を持っている話のページ（サイト＋パス）] } を付けてくる。
+    // その話の「原文 → 訳」のうち、まだ渡していない分（はじめては全部、2回目からは増えた・訳し直した分）だけを渡す（trpairs）。
+    // 作品ごとの訳（para:作品）は、控え（ep:作品|ページ）から、その話の作品を調べて渡す。話ごとの訳（live:ページ）はページで選ぶ
+    let trLast = { at: 0, sig: '' };
+    const sendTrPairs = want => {
+      try {
+        if (OUT_X) return;
+        const pages = new Set(((want && want.pages) || []).map(String));
+        if (!pages.size) return;
+        const sig = hashStr([...pages].join('\n'));
+        if (sig === trLast.sig && Date.now() - trLast.at < 60000) return; // 続けて届いたときは1分に1回
+        trLast = { at: Date.now(), sig };
+        const keys = GM_listValues();
+        const works = new Map(); // 作品 → その作品の、原文がある話のページ
+        for (const k of keys) {
+          const m = k.match(/^ep:(.+)\|([^|]+?)(?:@[^@#|]*)?$/);
+          if (!m) continue;
+          const pg = m[2].replace(/#.*$/, '');
+          if (!pages.has(pg)) continue;
+          if (!works.has(m[1])) works.set(m[1], new Set());
+          works.get(m[1]).add(pg);
+        }
+        const plain = t => noWm(stripTags(String(t == null ? '' : t))).replace(/\s+/g, ' ').trim();
+        const cur = (() => { try { return prov(); } catch { return ''; } })();
+        // いま使っているエンジンの訳をあとに（同じ原文なら、あとの訳が使われる）
+        const ordered = keys.slice().sort((a, b) => (a.endsWith('@' + cur) ? 1 : 0) - (b.endsWith('@' + cur) ? 1 : 0));
+        const pairs = [], marks = [];
+        const push = (s, t) => { const ps = plain(s), pt = plain(t); if (ps && pt && ps !== pt) pairs.push([ps, pt]); };
+        for (const k of ordered) {
+          let m = k.match(/^para:(.+?)(?:@([^@#]+))?$/);
+          if (m && works.has(m[1])) {
+            const map = GM_getValue(k, null);
+            if (!map || typeof map !== 'object') continue;
+            const sentK = 'trsent:' + k, dirtyK = 'trdirty:' + k, pagesK = 'trsentP:' + k;
+            // 前に渡したときになかった話の原文が増えていたら、その作品の訳をもう一度全部渡す（文字で合わせるので、増えた話の分だけ入る）
+            const before = new Set(GM_getValue(pagesK, []) || []);
+            const now = works.get(m[1]);
+            const grown = [...now].some(pg => !before.has(pg));
+            const full = !GM_getValue(sentK, false) || grown;
+            const srcs = full ? Object.keys(map) : Object.keys(GM_getValue(dirtyK, {}) || {});
+            srcs.forEach(src => { if (map[src] != null) push(src, map[src]); });
+            marks.push(() => { GM_setValue(sentK, true); GM_deleteValue(dirtyK); GM_setValue(pagesK, [...new Set([...before, ...now])]); });
+            continue;
+          }
+          m = k.match(/^live:(.+?)(?:@([^@#]+))?$/);
+          if (m && pages.has(m[1])) {
+            const v = GM_getValue(k, null);
+            if (!v || !v.map || typeof v.map !== 'object') continue;
+            const h = hashStr(JSON.stringify(v.map)), sentK = 'trsentL:' + k;
+            if (GM_getValue(sentK, '') === h) continue;
+            Object.entries(v.map).forEach(([src, t]) => push(src, t));
+            marks.push(() => GM_setValue(sentK, h));
+          }
+        }
+        for (let i = 0; i < pairs.length; i += 2000) post({ type: 'trpairs', v: 1, pairs: pairs.slice(i, i + 2000), last: i + 2000 >= pairs.length });
+        marks.forEach(f => f());
+      } catch (_) { /* 渡せなくても、ほかはいつも通り */ }
+    };
     window.addEventListener('message', e => {
       if (e.origin !== location.origin || typeof e.data !== 'string' || !e.data.startsWith('kztlNovel:')) return;
       let d; try { d = JSON.parse(e.data.slice(10)); } catch (_) { return; }
       if (!d) return;
-      if (d.type === 'hello') { gotHello = true; sendAll(d.v === 2 ? d : null); }
+      if (d.type === 'hello') { gotHello = true; sendAll(d.v === 2 ? d : null); if (d.trWant) setTimeout(() => sendTrPairs(d.trWant), 1500); }
       if (d.type === 'ack' && Array.isArray(d.items)) {
         const sent = GM_getValue('novelSent', {});
         d.items.forEach(a => { if (a && a.key) sent[a.key] = { n: a.n || 0, h: a.h || '', sig: a.sig || '', hv: 1, at: Date.now() }; });
@@ -4615,6 +4686,10 @@ ${body}</main></body></html>`;
   GM_registerMenuCommand('クラウドから戻す', restoreFromCloud);
   if (!sameSiteFrame) GM_registerMenuCommand('WT（まんが・ウェブトゥーン）翻訳をこのサイトで使う（切り替え）', toggleWT);
   GM_registerMenuCommand('保存済みの訳を全削除', () => clearAllNovel());
+  GM_registerMenuCommand('イカ墨ノベルの原文の下に、訳を全部渡し直す', () => {
+    GM_listValues().filter(k => k.startsWith('trsent:') || k.startsWith('trsentL:') || k.startsWith('trsentP:') || k.startsWith('trdirty:')).forEach(GM_deleteValue);
+    alert('次にイカ墨ノベルを開いたとき、原文の下に入れる訳を全部渡し直します');
+  });
   // この話の訳（本文・カカオの表示中翻訳・挿絵）を消して、ページを読み直す。ほかの話・作品メモ・クラウドは残す
   var lastCacheBase, lastSrcs; if (lastCacheBase === undefined) { lastCacheBase = ''; lastSrcs = []; }
   async function clearEpisode() {
@@ -4658,6 +4733,7 @@ ${body}</main></body></html>`;
     if (!confirm('この端末に保存した小説の訳を全部消します（作品メモ・設定は残ります）。元に戻せません。よろしいですか？')) return;
     const keys = GM_listValues().filter(k => k.startsWith('cache') || k.startsWith('live:') || k.startsWith('para:') || k.startsWith('ep:') || k.startsWith('tail:'));
     keys.forEach(GM_deleteValue);
+    GM_listValues().filter(k => k.startsWith('trsent:') || k.startsWith('trsentL:') || k.startsWith('trsentP:') || k.startsWith('trdirty:')).forEach(GM_deleteValue); // 原文の下に渡した記録も
     alert(keys.length + '件削除しました。ページを読み直します');
     location.reload(); // 画面に出ている訳・覚えている訳を、また保存してしまわないように
   }
