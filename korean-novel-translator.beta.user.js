@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.20
+// @version      10.6.21
 // @description  【試験版】韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -871,6 +871,12 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
   }
 
   // ---------- API ----------
+  // ストリーミングの返事の「ここで終わり」の印（Gemini：finishReason、DeepSeek・Solar：[DONE]、Claude：message_stop、PLaMo：stop:true）
+  // iPhone（Safari・Orion）やモバイル回線では、訳が全部届いたのに「通信終わり」の合図が来ず、🌀が回り続けることがある。
+  // 印が届いて1.5秒なにも来なければ、こちらから受信を閉じて「終わった」にする（印のあとに届く分も待つ）
+  const SSE_END_RE = /"finishReason"\s*:\s*"[A-Z_]+"|^data:\s*\[DONE\]|"type"\s*:\s*"message_stop"|"stop"\s*:\s*true/m;
+  const sseEnded = t => !!t && SSE_END_RE.test(String(t).slice(-4000));
+  const SSE_END_WAIT = 1500;
   // sse：{ parse, onText } を渡すと、ストリーミングで届いた途中の訳文を onText に流す（料金は同じ）
   function req(url, headers, body, sse) {
     return new Promise((res, rej) => {
@@ -915,7 +921,20 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
       function viaGM() {
       // Tampermonkeyは「stream」で受け取ると途中経過が届く。ほかの拡張は onprogress で届く場合だけ途中表示
       const useStream = !!(sse && sse.onText) && typeof GM_info !== 'undefined' && /tampermonkey/i.test(GM_info.scriptHandler || '');
-      GM_xmlhttpRequest({
+      let gmEndT = 0, gmReq = null;
+      const gmWatch = r => {
+        if (handled || !sse || !r) return;
+        const t = r.responseText;
+        clearTimeout(gmEndT);
+        if (!sseEnded(t)) return;
+        gmEndT = setTimeout(() => {
+          if (handled) return;
+          handled = true;
+          finish(r.status || 0, r.responseText || t || '', r.responseHeaders);
+          try { gmReq && gmReq.abort && gmReq.abort(); } catch { /* 閉じられなくても */ }
+        }, SSE_END_WAIT);
+      };
+      gmReq = GM_xmlhttpRequest({
         method: 'POST', url, timeout: 300000,
         headers: Object.assign({ 'content-type': 'application/json' }, headers),
         data: JSON.stringify(body),
@@ -925,22 +944,25 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
           if (!useStream || !stream || typeof stream.getReader !== 'function') return;
           handled = true;
           const reader = stream.getReader(), dec = new TextDecoder();
-          let txt = '';
+          let txt = '', endT = 0, ended = false;
           try {
             for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
               txt += typeof value === 'string' ? value : dec.decode(value, { stream: true });
               progress(txt);
+              clearTimeout(endT);
+              if (sseEnded(txt)) endT = setTimeout(() => { ended = true; try { reader.cancel(); } catch { /* 閉じられなくても */ } }, SSE_END_WAIT);
             }
-          } catch (e) { return rej(new Error('通信エラー（' + (e && e.message) + '）')); }
+          } catch (e) { if (!ended) { clearTimeout(endT); return rej(new Error('通信エラー（' + (e && e.message) + '）')); } }
+          clearTimeout(endT);
           finish(r.status, txt, r.responseHeaders);
         },
-        onprogress: r => { if (!handled) progress(r && r.responseText); },
-        onreadystatechange: r => { if (!handled && r.readyState === 3) progress(r.responseText); },
-        onload: r => { if (!handled) finish(r.status, r.responseText || '', r.responseHeaders); },
-        onerror: r => rej(new Error('通信エラー（' + [r && r.status, r && (r.error || r.statusText)].filter(Boolean).join(' ') + '）')),
-        ontimeout: () => rej(new Error('タイムアウト')),
+        onprogress: r => { if (!handled) { progress(r && r.responseText); gmWatch(r); } },
+        onreadystatechange: r => { if (!handled && r.readyState === 3) { progress(r.responseText); gmWatch(r); } },
+        onload: r => { clearTimeout(gmEndT); if (!handled) { handled = true; finish(r.status, r.responseText || '', r.responseHeaders); } },
+        onerror: r => { clearTimeout(gmEndT); if (!handled) rej(new Error('通信エラー（' + [r && r.status, r && (r.error || r.statusText)].filter(Boolean).join(' ') + '）')); },
+        ontimeout: () => { clearTimeout(gmEndT); if (!handled) rej(new Error('タイムアウト')); },
       });
       }
     });
@@ -964,7 +986,7 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
     const hs = [...r.headers].map(([k, v]) => k + ': ' + v).join('\n');
     if (!r.body || !r.body.getReader) { try { return { status: r.status, txt: await r.text(), headers: hs }; } finally { clearTimeout(timer); } }
     const reader = r.body.getReader(), dec = new TextDecoder();
-    let txt = '';
+    let txt = '', endT = 0, ended = false;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -972,9 +994,11 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
         arm();
         txt += dec.decode(value, { stream: true });
         progress(txt);
+        clearTimeout(endT);
+        if (r.ok && sseEnded(txt)) endT = setTimeout(() => { ended = true; clearTimeout(timer); try { reader.cancel(); } catch { /* 閉じられなくても */ } }, SSE_END_WAIT);
       }
-    } catch (e) { throw new Error(timedOut ? 'タイムアウト' : '通信エラー（' + (e && e.message) + '）'); }
-    finally { clearTimeout(timer); }
+    } catch (e) { if (!ended) throw new Error(timedOut ? 'タイムアウト' : '通信エラー（' + (e && e.message) + '）'); }
+    finally { clearTimeout(timer); clearTimeout(endT); }
     return { status: r.status, txt, headers: hs };
   }
 
