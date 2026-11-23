@@ -24,12 +24,9 @@
 ## 1. 入れ方
 
 1. ブラウザに拡張機能の **Tampermonkey** か **Violentmonkey** を入れる
-   - **Android**：Firefox か Edge
-   - **iPhone / iPad**：
-     - Safari ＋ App Storeの Tampermonkey（有料・500円ほど）
-     - または **Orion ブラウザ** ＋ Violentmonkey（無料）：Orionで [Violentmonkey のページ](https://addons.mozilla.org/firefox/addon/violentmonkey/) を開いて追加
-       - ※ Orionは拡張の対応が完全ではなく、挿絵・WTの翻訳がうまくいかないことがあります。安定して使いたい場合は Safari ＋ Tampermonkey がおすすめです
-   - **PC**：Chrome・Edge・Firefox
+   - **Android**：Firefox
+   - **iPhone / iPad**：Safari ＋ App Storeの Tampermonkey（有料・500円ほど）
+   - **PC**：Firefox
    - 無料の **Violentmonkey** でも使えます（[Firefox用](https://addons.mozilla.org/firefox/addon/violentmonkey/)・AndroidのFirefoxも同じページから）
 2. 下のリンクを開いて「インストール」を押す（Tampermonkey・Violentmonkey どちらも同じリンク）
 
@@ -49,9 +46,7 @@
 ### うまく入らないとき
 - **インストール画面が出ずにコードが表示される** → Tampermonkeyの「ダッシュボード」→「ユーティリティ」→「URLからインストール」に、上のリンクのアドレスを貼る
   （Violentmonkeyなら、アイコン →「⚙」→「＋」→「URLからインストール」）
-- **iPhoneのOrionでコードが表示されるだけ** → Orionではリンクを開いてもインストール画面が出ません。Violentmonkeyのアイコン →「⚙」（ダッシュボード）→「＋」→「URLからインストール」に上のリンクを貼ってください。それでもだめなら「＋」→「新規」を押して、出てきた中身を全部消し、上のリンクのコードを全部コピーして貼り付けて保存（あとの更新は自動で届きます）
 - **iPhone / iPadで動かない** → 「設定」→「アプリ」→「Safari」→「機能拡張」→「Tampermonkey」で「すべてのWebサイト」を「許可」にする
-- **PCのChrome / Edgeで動かない** → 拡張機能の管理画面で「デベロッパーモード」をオンにして、Tampermonkeyの「ユーザースクリプトを許可」をオンにする
 
 ---
 
@@ -211,7 +206,7 @@ APIキーとトークンはバックアップに入らないので、入れ直�
 > The English version is currently a **beta**. Please report anything strange.
 
 **Install**
-1. Install **Tampermonkey** (Chrome / Edge / Firefox / Safari on iPhone) or **Violentmonkey** (Firefox, also on Android).
+1. Install **Tampermonkey** (Firefox, or Safari on iPhone) or **Violentmonkey** (Firefox, also on Android).
 2. Open 👉 **[Install the script (beta)](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.beta.user.js)** and press "Install".
 3. Open a novel page and tap ⚙ to open settings. Choose **Language / 表示・翻訳の言語: English**, enter your **Gemini API key** ([get one at Google AI Studio](https://aistudio.google.com/apikey)) and press **Save**.
 4. Press **TL** to translate, **RAW** to go back to the original.
@@ -234,7 +229,7 @@ APIキーとトークンはバックアップに入らないので、入れ直�
 > 中文版目前是**测试版**。如果发现奇怪的地方，欢迎反馈。
 
 **安装方法**
-1. 安装浏览器扩展 **Tampermonkey**（Chrome / Edge / Firefox / iPhone 的 Safari）或 **Violentmonkey**（Firefox，安卓也可用）。
+1. 安装浏览器扩展 **Tampermonkey**（Firefox，或 iPhone 的 Safari）或 **Violentmonkey**（Firefox，安卓也可用）。
 2. 打开 👉 **[安装脚本（测试版）](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.beta.user.js)**，点击“安装”。
 3. 打开小说页面，点 ⚙ 打开设置。在 **语言 / Language** 中选择 **中文（简体）**，填入 **Gemini API 密钥**（可在 [Google AI Studio](https://aistudio.google.com/apikey) 获取），然后点 **保存**。
 4. 按 **译** 开始翻译，按 **原** 恢复原文。
