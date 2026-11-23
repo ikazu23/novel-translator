@@ -3,7 +3,7 @@
 // @name:ja      イカ墨翻訳
 // @namespace    ikasumi-novel-tl
 // @author       イカ墨
-// @version      10.6.21
+// @version      10.6.23
 // @description  韓国語・中国語・英語の小説を、ページを開いたまま自然な日本語に翻訳。漫画・ウェブトゥーンの吹き出しも翻訳（WTモード）
 // @match        *://*.ridibooks.com/*
 // @match        *://page.kakao.com/*
@@ -778,12 +778,18 @@ ${curLang() === 'ko' ? '- 敬語かタメ口かは、人物の設定やメモで
     return el && koNodes(el) > 0 ? el : null;
   };
   // おすすめ作品の一覧（「作品名／作者／(2,537)」の並び）っぽいか。本文が読み込まれる前に、これを本文と間違えないように
+  // 行の並びがおすすめ一覧か：①「(2,537)」のような数字だけの行がある ②「作品名 (作者名)」の行ばかり（訳された（）も含む）
+  const TA_LINE = /^\S.{0,60}[(（][^()（）\n]{1,20}[)）]$/;
+  function listLines(lines) {
+    if (lines.length < 4) return false;
+    const num = lines.filter(s => /^\(\s*[\d,]+\s*\)$/.test(s)).length;
+    if (num >= 2 && num >= lines.length * 0.12) return true;
+    const ta = lines.filter(s => TA_LINE.test(s)).length;
+    return ta >= 4 && ta >= lines.length * 0.6;
+  }
   function looksLikeList(el) {
     try {
-      const lines = String(el.innerText || el.textContent || '').split('\n').map(s => s.trim()).filter(Boolean);
-      if (lines.length < 4) return false;
-      const num = lines.filter(s => /^\(\s*[\d,]+\s*\)$/.test(s)).length;
-      return num >= 2 && num >= lines.length * 0.12;
+      return listLines(String(el.innerText || el.textContent || '').split('\n').map(s => s.trim()).filter(Boolean));
     } catch { return false; }
   }
   function findBodies() {
@@ -3284,6 +3290,7 @@ ${body}</main></body></html>`;
     if (OUT_X) return false; // 英語・中国語に訳す版は対象外
     const items = ((data && data.paras) || []).filter(x => x && !x.blank && !x.ilNote && x.text && x.text !== SCENE_MARK);
     if (!items.length) return false;
+    if (listLines(items.map(x => String(x.text).trim()))) return true; // 訳されていても、おすすめ一覧なら送らない
     return items.filter(x => notJa(x.text)).length >= items.length * 0.6;
   }
   const snapLater = () => { clearTimeout(snapTimer); snapTimer = setTimeout(snapshotEp, 800); };
@@ -3336,7 +3343,7 @@ ${body}</main></body></html>`;
       const k = epKey(), old = GM_getValue(k, null);
       // 本文の文だけを数える（空行・「挿絵あり」の印・場面の区切り「◇　◇　◇」は数えない）
       const count = d => ((d && d.paras) || []).filter(x => x && !x.blank && !x.ilNote && x.text !== SCENE_MARK && !/^【挿絵あり[^】]*】$/.test(String(x.text || ''))).length;
-      const n = count(data), oldN = old ? count(old.data) : 0;
+      const n = count(data), oldN = old ? (old.slim ? (old.n || 0) : count(old.data)) : 0; // 軽くした控えは、覚えておいた文の数で比べる
       // 途中までしか表示されていないときは、前の多い方を残す。
       // カカオ（読んだ文を全部記録してある）は、場面のまとまり方で数文減ることがあるので、大きく減ったときだけ残す
       if (old && (live ? n < oldN - Math.max(3, Math.round(oldN * 0.1)) : n < oldN)) return;
@@ -3399,7 +3406,7 @@ ${body}</main></body></html>`;
     const works = new Map();
     for (const k of GM_listValues()) {
       if (!k.startsWith('ep:')) continue;
-      const v = GM_getValue(k, null); if (!v) continue;
+      const v = GM_getValue(k, null); if (!v || !v.data) continue; // 中身を消した（軽くした）控えは入れない
       const w = works.get(v.wk) || { wk: v.wk, work: v.work, pages: new Map() };
       const page = k.slice(3).replace(/@[^@]*$/, '');
       const list = w.pages.get(page) || []; list.push(v); w.pages.set(page, list);
@@ -4581,6 +4588,7 @@ ${body}</main></body></html>`;
   // ---------- イカ墨ノベルへ訳した話を渡す ----------
   // イカ墨ノベル（ikazu23.github.io）を開くと、この端末で訳した話のうち、まだ渡していない話（または前より先まで訳した話）を渡す。
   // 受け取ったという返事が来た話だけ「渡した」と覚える。ほかのサイトでは何もしない
+  const EP_SLIM_AFTER = 7 * 24 * 3600 * 1000; // ノベルに届いた控えを軽くするまでの日数（訳してから）
   const hashStr = t => { let h = 5381; for (let i = 0; i < t.length; i++) h = ((h * 33) ^ t.charCodeAt(i)) >>> 0; return h.toString(36) + ':' + t.length; };
   function novelHandoff() {
     if (OUT_X || window.top !== window.self || location.host !== 'ikazu23.github.io') return;
@@ -4599,17 +4607,21 @@ ${body}</main></body></html>`;
       const skipWk = new Set(info && Array.isArray(info.skipWk) ? info.skipWk : []);
       const sent = GM_getValue('novelSent', {});
       const best = new Map(); // 話ごとに1つ（エンジン別に複数あれば新しい方）
+      const slimAt = new Map(); // 中身を消した（軽くした）控えの、いちばん新しい時刻
       for (const k of GM_listValues()) {
         if (!k.startsWith('ep:')) continue;
         const v = GM_getValue(k, null);
+        if (v && v.slim) { const pg = k.slice(3).replace(/@[^@]*$/, ''); slimAt.set(pg, Math.max(slimAt.get(pg) || 0, v.at || 0)); continue; }
         if (!v || !v.data || !Array.isArray(v.data.paras) || !v.wk) continue;
         if (/ikazu23\.github\.io/.test(String(v.data.source || '') + k)) continue; // イカ墨ノベルの中で訳した話は送り返さない
         if (mostlyUntranslated(v.data)) continue; // おすすめ一覧などを間違えて控えた話は送らない
         const page = k.slice(3).replace(/@[^@]*$/, '');
         const o = best.get(page);
-        if (!o || (v.at || 0) > (o.at || 0)) best.set(page, Object.assign({ page }, v));
+        if (!o || (v.at || 0) > (o.at || 0)) best.set(page, Object.assign({ page, key: k }, v));
       }
-      const eps = [];
+      // いちばん新しい控えを軽くしてある話は送らない（古いほかのエンジンの控えで、ノベルの新しい版を上書きしない）
+      for (const [pg, at] of slimAt) { const o = best.get(pg); if (o && at >= (o.at || 0)) best.delete(pg); }
+      const eps = [], slim = [];
       for (const v of best.values()) {
         const s0 = sent[v.page];
         const h = hashStr(JSON.stringify(v.data)); // 中身・見た目（囲みなど）が変わったら送り直す
@@ -4617,11 +4629,23 @@ ${body}</main></body></html>`;
         const sentBefore = () => s0 && (s0.h ? s0.h === h : (s0.n || 0) >= (v.n || 0) && s0.hv);
         if (have && !skipWk.has(v.wk)) {
           const a = have[v.page];
-          if (Array.isArray(a) && a[0]) { if (a[0] === sig || a[1] === sig) continue; } // ノベルに同じ版がある・前に「残す」にした版
+          if (Array.isArray(a) && a[0]) {
+            // ノベルにまったく同じ版がある話は、訳してから7日たったら控えの中身を消して軽くする（端末の保存が大きくなりすぎないように）
+            if (a[0] === sig && Date.now() - (v.at || 0) > EP_SLIM_AFTER) slim.push(v);
+            if (a[0] === sig || a[1] === sig) continue; // ノベルに同じ版がある・前に「残す」にした版
+          }
           else if (a && sentBefore()) continue; // 指紋ができる前に入れた話：前と同じ決め方
           // ノベルに無い話（消した話・まだ入れていない話）は送る
         } else if (sentBefore()) continue;
         eps.push({ key: v.page, wk: v.wk, work: v.work, title: v.title, num: v.num, n: v.n || 0, h, sig, at: v.at, data: v.data });
+      }
+      // 軽くする：話の名前・番号・文の数だけ残す（訳の表示・原文の下の訳には使っていないので、そちらはそのまま）
+      for (const v of slim) {
+        try {
+          const cur = GM_getValue(v.key, null);
+          if (!cur || cur.slim || (cur.at || 0) !== (v.at || 0)) continue; // 途中で訳し直された控えはそのまま
+          GM_setValue(v.key, { work: cur.work, wk: cur.wk, title: cur.title, num: cur.num, prov: cur.prov, at: cur.at, n: cur.n || 0, slim: Date.now() });
+        } catch (e) { /* 軽くできなくても、送るのはいつも通り */ }
       }
       if (eps.length) { post({ type: 'send', eps }); try { ui.toast(`イカ墨翻訳：${eps.length}話を送りました`, 3000); } catch (e) { /* 表示できない */ } }
       else if (!best.size && !sendAll.told) { sendAll.told = true; try { ui.toast('イカ墨翻訳：この端末で訳した話の控えがまだありません（訳した話を開いて「訳」を押すと控えられます）', 5000); } catch (e) { /* 表示できない */ } }
