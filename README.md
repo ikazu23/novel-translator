@@ -26,7 +26,7 @@
 1. ブラウザに拡張機能の **Tampermonkey** か **Violentmonkey** を入れる
    - **Android**：Firefox
    - **iPhone / iPad**：Safari ＋ App Storeの Tampermonkey（有料・500円ほど）
-   - **PC**：Firefox
+   - **PC**：Chrome・Firefox
    - 無料の **Violentmonkey** でも使えます（[Firefox用](https://addons.mozilla.org/firefox/addon/violentmonkey/)・AndroidのFirefoxも同じページから）
 2. 下のリンクを開いて「インストール」を押す（Tampermonkey・Violentmonkey どちらも同じリンク）
 
@@ -47,6 +47,7 @@
 - **インストール画面が出ずにコードが表示される** → Tampermonkeyの「ダッシュボード」→「ユーティリティ」→「URLからインストール」に、上のリンクのアドレスを貼る
   （Violentmonkeyなら、アイコン →「⚙」→「＋」→「URLからインストール」）
 - **iPhone / iPadで動かない** → 「設定」→「アプリ」→「Safari」→「機能拡張」→「Tampermonkey」で「すべてのWebサイト」を「許可」にする
+- **PCのChromeで動かない** → `chrome://extensions` を開いて「デベロッパーモード」をオンにして、Tampermonkeyの「詳細」で「ユーザースクリプトを許可」をオンにする
 
 ---
 
@@ -206,7 +207,7 @@ APIキーとトークンはバックアップに入らないので、入れ直�
 > The English version is currently a **beta**. Please report anything strange.
 
 **Install**
-1. Install **Tampermonkey** (Firefox, or Safari on iPhone) or **Violentmonkey** (Firefox, also on Android).
+1. Install **Tampermonkey** (Chrome / Firefox, or Safari on iPhone) or **Violentmonkey** (Firefox, also on Android).
 2. Open 👉 **[Install the script (beta)](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.beta.user.js)** and press "Install".
 3. Open a novel page and tap ⚙ to open settings. Choose **Language / 表示・翻訳の言語: English**, enter your **Gemini API key** ([get one at Google AI Studio](https://aistudio.google.com/apikey)) and press **Save**.
 4. Press **TL** to translate, **RAW** to go back to the original.
@@ -229,7 +230,7 @@ APIキーとトークンはバックアップに入らないので、入れ直�
 > 中文版目前是**测试版**。如果发现奇怪的地方，欢迎反馈。
 
 **安装方法**
-1. 安装浏览器扩展 **Tampermonkey**（Firefox，或 iPhone 的 Safari）或 **Violentmonkey**（Firefox，安卓也可用）。
+1. 安装浏览器扩展 **Tampermonkey**（Chrome / Firefox，或 iPhone 的 Safari）或 **Violentmonkey**（Firefox，安卓也可用）。
 2. 打开 👉 **[安装脚本（测试版）](https://raw.githubusercontent.com/ikazu23/novel-translator/main/korean-novel-translator.beta.user.js)**，点击“安装”。
 3. 打开小说页面，点 ⚙ 打开设置。在 **语言 / Language** 中选择 **中文（简体）**，填入 **Gemini API 密钥**（可在 [Google AI Studio](https://aistudio.google.com/apikey) 获取），然后点 **保存**。
 4. 按 **译** 开始翻译，按 **原** 恢复原文。
